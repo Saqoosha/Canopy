@@ -8097,6 +8097,66 @@ enum SidebarLogicProbe {
                 store.searchText = ""
             }
 
+            // Search matches on closed local rows are cached between keystrokes;
+            // each input's change must drop them, or the list shows stale rows.
+            do {
+                let savedHidden = SessionStorePersistence.loadHiddenIds()
+                defer { SessionStorePersistence.saveHiddenIds(savedHidden) }
+                let store = SessionStore()
+                store.unhideAll()
+                func entry(_ id: String, _ title: String) -> SessionEntry {
+                    SessionEntry(id: id, title: title, timestamp: Date(), projectDirectory: cwd)
+                }
+                func closedTitles() -> [String] {
+                    store.visibleRows.compactMap { if case .closedLocal(let e) = $0 { return e.title } else { return nil } }
+                }
+                store._probeSeedRecents([entry("cache-1", "gamma one")])
+                store.searchText = "gamma"
+                _ = closedTitles()
+                store._probeSeedRecents([entry("cache-1", "gamma one"), entry("cache-2", "gamma two")])
+                record("search cache: a recents change shows the new match",
+                       closedTitles().sorted() == ["gamma one", "gamma two"])
+                store._probeSeedSearchIndex([entry("cache-3", "gamma old")])
+                record("search cache: an index arriving mid-search shows its matches",
+                       closedTitles().sorted() == ["gamma old", "gamma one", "gamma two"])
+                store.hideClosedSession(rowId: "local:cache-1")
+                record("search cache: hiding a row removes it from the matches",
+                       closedTitles().sorted() == ["gamma old", "gamma two"])
+                final class Fired: @unchecked Sendable { var value = false }
+                let fired = Fired()
+                withObservationTracking({ _ = store.visibleRows }, onChange: { fired.value = true })
+                store.hideClosedSession(rowId: "local:cache-3")
+                record("search cache: a cache hit still observes its inputs", fired.value)
+                store.searchText = "two"
+                record("search cache: a new query re-matches", closedTitles() == ["gamma two"])
+                store.searchText = ""
+            }
+
+            // A search shows at most `searchClosedRowLimit` closed rows, newest
+            // first, and counts the rest; open rows are never cut.
+            do {
+                let limit = SessionStore.searchClosedRowLimit
+                let store = SessionStore()
+                let open = OpenSession(origin: .local(cwd), resumeId: "cap-open", title: "delta open", project: "p", status: .live)
+                store._probeSeedOpenSessions([open])
+                let base = Date(timeIntervalSince1970: 1_000_000)
+                store._probeSeedRecents((0..<(limit + 5)).map {
+                    SessionEntry(id: "cap-\($0)", title: "delta \($0)", timestamp: base.addingTimeInterval(Double($0)),
+                                 projectDirectory: cwd)
+                })
+                store.searchText = "delta"
+                let counted = store.visibleRowsCounted
+                let closed = counted.rows.compactMap { if case .closedLocal(let e) = $0 { return e.id } else { return nil } }
+                record("search limit: closed rows stop at the limit, counting the rest",
+                       closed.count == limit && counted.overflow == 5)
+                record("search limit: the newest closed rows are the ones kept",
+                       closed.first == "cap-\(limit + 4)" && !closed.contains("cap-4"))
+                record("search limit: open rows are not cut",
+                       counted.rows.contains { if case .open = $0 { return true } else { return false } })
+                store.searchText = ""
+                record("search limit: no limit without a query", store.visibleRowsCounted.overflow == 0)
+            }
+
             // [A][B][C], drag C above B → [A][C][B]
             let dA = dragSession("A"), dB = dragSession("B"), dC = dragSession("C")
             let storeDrag = SessionStore()
@@ -15719,6 +15779,22 @@ enum SidebarLogicProbe {
                 let replaced = ClaudeSessionHistory.lastRelocatedCwd(atPath: file.path, from: whole.end)
                 record("relocation scan: a file shorter than the kept offset is read from the start",
                        replaced.cwd == "/a/first" && replaced.end == UInt64(first.utf8.count))
+            }
+            do {
+                // A 3 MB line leaves two 1 MiB reads without a newline, and the
+                // record's `relocatedCwd` key straddles the third read's end.
+                let file = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-relocated-split-\(UUID().uuidString).jsonl")
+                defer { try? FileManager.default.removeItem(at: file) }
+                let recordText = "{\"type\":\"relocated\",\"relocatedCwd\":\"/a/split\"}\n"
+                let keyOffset = recordText.distance(from: recordText.startIndex,
+                                                    to: recordText.range(of: "relocatedCwd")!.lowerBound)
+                let padLength = 3 << 20 - keyOffset - 5
+                let pad = "{\"type\":\"user\",\"text\":\"" + String(repeating: "x", count: padLength - 26) + "\"}\n"
+                try? Data((pad + recordText).utf8).write(to: file)
+                let scan = ClaudeSessionHistory.lastRelocatedCwd(atPath: file.path)
+                record("relocation scan: a record split across reads after newline-free reads is found",
+                       pad.utf8.count == padLength && scan.cwd == "/a/split"
+                           && scan.end == UInt64((pad + recordText).utf8.count))
             }
             record("local open refusal: a removed folder is named",
                    SessionStore.localOpenFailureMessage(folder: folder, folderExists: { _ in false })

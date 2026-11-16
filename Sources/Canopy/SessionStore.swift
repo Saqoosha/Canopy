@@ -145,7 +145,9 @@ final class SessionStore {
     }
 
     /// Local JSONL history, refreshed via `refreshRecents()`.
-    private(set) var recents: [SessionEntry] = []
+    private(set) var recents: [SessionEntry] = [] {
+        didSet { closedLocalMatches = nil }
+    }
 
     /// The sidebar's search query. Non-empty switches the closed rows from
     /// `recents` (capped at `maxSessionsToKeep`) to `searchIndex`, which holds
@@ -162,7 +164,9 @@ final class SessionStore {
 
     /// Every local session, uncapped. Built on the first keystroke of each
     /// search and kept (stale) while the next build runs.
-    private(set) var searchIndex: [SessionEntry]?
+    private(set) var searchIndex: [SessionEntry]? {
+        didSet { closedLocalMatches = nil }
+    }
     private(set) var isBuildingSearchIndex = false
     private var searchIndexRebuildPending = false
 
@@ -194,6 +198,25 @@ final class SessionStore {
         guard searching, let searchIndex else { return recents }
         let recentIds = Set(recents.map(\.id))
         return recents + searchIndex.filter { !recentIds.contains($0.id) }
+    }
+
+    /// `closedSource` minus hidden rows, matched against `terms`. Keyed on `terms`;
+    /// the didSets of `recents`, `searchIndex` and `hiddenIds` clear it. Open
+    /// sessions are `@Observable` objects and stay out.
+    @ObservationIgnored private var closedLocalMatches: (terms: [String], entries: [SessionEntry])?
+
+    private func closedLocalMatching(_ terms: [String]) -> [SessionEntry] {
+        // Read every input even on a hit: these reads are what register the
+        // caller's observation, so skipping them would stop the sidebar updating.
+        let recents = recents, searchIndex = searchIndex, hiddenIds = hiddenIds
+        if let cached = closedLocalMatches, cached.terms == terms { return cached.entries }
+        let entries = Self.closedSource(searching: !terms.isEmpty, recents: recents, searchIndex: searchIndex)
+            .filter { entry in
+                !hiddenIds.contains(entry.id)
+                    && (terms.isEmpty || SessionSearch.matches(terms, .closedLocal(entry)))
+            }
+        closedLocalMatches = (terms, entries)
+        return entries
     }
 
     /// Cloud (claude.ai/code) sessions, refreshed via `refreshCloud()`.
@@ -576,7 +599,9 @@ final class SessionStore {
     /// Sidebar-hidden session ids. Closed local rows whose JSONL id is in
     /// this set are filtered out of `visibleRows`; cloud rows with id in
     /// the set are also hidden. Persists across launches.
-    private(set) var hiddenIds: Set<String> = SessionStorePersistence.loadHiddenIds()
+    private(set) var hiddenIds: Set<String> = SessionStorePersistence.loadHiddenIds() {
+        didSet { closedLocalMatches = nil }
+    }
 
     /// True when the sidebar UI is currently visible. Cloud polling is paused
     /// otherwise. Set by the Sidebar view from `.task` / `.onDisappear`.
@@ -804,15 +829,23 @@ final class SessionStore {
         logger.info("showCapReachedHint: panes at cap; focused pane is launcher; hint dropped")
     }
 
-    /// Sorted, de-duplicated, filtered rows the sidebar should render.
-    var visibleRows: [SidebarRow] {
+    /// Sorted, de-duplicated, filtered rows the sidebar should render, capped
+    /// while searching (`searchClosedRowLimit`).
+    var visibleRows: [SidebarRow] { visibleRowsCounted.rows }
+
+    /// While searching, closed rows past this many (newest first) are left out:
+    /// the List's per-keystroke diff grows with the row count.
+    static let searchClosedRowLimit = 100
+
+    /// `visibleRows`, plus how many closed rows `searchClosedRowLimit` left out.
+    var visibleRowsCounted: (rows: [SidebarRow], overflow: Int) {
         // Drop any closed local row whose JSONL id is also currently open —
         // the open row is the live representation; showing the recents copy
         // would be a duplicate.
         let openResumeIds = Set(openSessions.map(\.resumeId))
         let terms = SessionSearch.terms(searchText)
-        let recentRows = Self.closedSource(searching: !terms.isEmpty, recents: recents, searchIndex: searchIndex)
-            .filter { !openResumeIds.contains($0.id) && !hiddenIds.contains($0.id) }
+        let recentRows = closedLocalMatching(terms)
+            .filter { !openResumeIds.contains($0.id) }
             .map(SidebarRow.closedLocal)
         let cloudRows = cloud
             .filter { $0.kind == .web && !hiddenIds.contains($0.id) }
@@ -820,11 +853,23 @@ final class SessionStore {
         let allRows: [SidebarRow] =
             openSessions.map(SidebarRow.open) + recentRows + cloudRows
         let deduped = SidebarRow.deduped(allRows, teleportedFromMap: teleportedFromMap)
-        let sorted = SidebarRow.sorted(terms.isEmpty ? deduped : deduped.filter { SessionSearch.matches(terms, $0) })
+        // Closed local rows were matched in `closedLocalMatching`.
+        let sorted = SidebarRow.sorted(terms.isEmpty ? deduped : deduped.filter {
+            if case .closedLocal = $0 { return true }
+            return SessionSearch.matches(terms, $0)
+        })
         // Launcher rows are added AFTER dedup / sort / filter, never before.
         // They stand for a live pane, and a pane the filter can hide would put
         // the row-order-is-the-pane-strip correspondence back where it started.
-        return Self.interleavingLaunchers(into: filter.apply(to: sorted), panes: panes)
+        var shown = filter.apply(to: sorted)
+        var overflow = 0
+        if !terms.isEmpty {
+            // `sorted` puts the open block first and the closed rows newest first.
+            let closedCount = shown.count - shown.prefix(while: \.isOpen).count
+            overflow = max(0, closedCount - Self.searchClosedRowLimit)
+            shown.removeLast(overflow)
+        }
+        return (Self.interleavingLaunchers(into: shown, panes: panes), overflow)
     }
 
     /// True when the active selection points at an open session.
@@ -3724,6 +3769,14 @@ final class SessionStore {
     /// file-private), so `_SidebarLogicProbe` cannot assign it directly.
     func _probeSeedOpenSessions(_ sessions: [OpenSession]) {
         openSessions = sessions
+    }
+
+    func _probeSeedRecents(_ entries: [SessionEntry]) {
+        recents = entries
+    }
+
+    func _probeSeedSearchIndex(_ entries: [SessionEntry]) {
+        searchIndex = entries
     }
 
     /// Probe-only: park a snapshot the way `makeRestored()` does, without
