@@ -8132,6 +8132,34 @@ enum SidebarLogicProbe {
                 store.searchText = ""
             }
 
+            // A query that narrows the last one matches only its rows; any other
+            // query starts from every row again.
+            do {
+                record("search narrows: a longer term, more terms, any case",
+                       SessionSearch.narrows(["gamma"], ["gam"]) && SessionSearch.narrows(["gamma", "o"], ["gamma"])
+                           && SessionSearch.narrows(["GAMMA"], ["gam"]))
+                record("search narrows: a different term, fewer terms, or no previous query do not",
+                       !SessionSearch.narrows(["gamma"], ["two"]) && !SessionSearch.narrows(["gamma"], ["gamma", "o"])
+                           && !SessionSearch.narrows(["gamma"], []))
+                let store = SessionStore()
+                store._probeSeedRecents(["gamma one", "gamma two", "delta two"].enumerated().map {
+                    SessionEntry(id: "narrow-\($0.offset)", title: $0.element, timestamp: Date(), projectDirectory: cwd)
+                })
+                func closedTitles() -> [String] {
+                    store.visibleRows.compactMap { if case .closedLocal(let e) = $0 { return e.title } else { return nil } }.sorted()
+                }
+                store.searchText = "two"
+                _ = closedTitles()
+                store.searchText = "gamma"
+                record("search narrows: a query that does not narrow sees every row",
+                       closedTitles() == ["gamma one", "gamma two"])
+                store.searchText = "gamma n"
+                record("search narrows: a narrowing query keeps only its matches", closedTitles() == ["gamma one"])
+                store.searchText = "gamma"
+                record("search narrows: widening again sees every row", closedTitles() == ["gamma one", "gamma two"])
+                store.searchText = ""
+            }
+
             // A search shows at most `searchClosedRowLimit` closed rows, newest
             // first, and counts the rest; open rows are never cut.
             do {
@@ -8153,6 +8181,13 @@ enum SidebarLogicProbe {
                        closed.first == "cap-\(limit + 4)" && !closed.contains("cap-4"))
                 record("search limit: open rows are not cut",
                        counted.rows.contains { if case .open = $0 { return true } else { return false } })
+                store._probeSeedCloud([RemoteSession(id: "session_capCloud", summary: "delta cloud", lastModified: base,
+                                                     status: "idle", repoOwner: "o", repoName: "r", branch: nil,
+                                                     kind: .web, origin: nil, cwd: nil)])
+                let withCloud = store.visibleRowsCounted
+                record("search limit: an older cloud match is neither cut nor counted",
+                       withCloud.overflow == 5
+                           && withCloud.rows.contains { if case .closedCloud = $0 { return true } else { return false } })
                 store.searchText = ""
                 record("search limit: no limit without a query", store.visibleRowsCounted.overflow == 0)
             }

@@ -14,6 +14,16 @@ enum SessionSearch {
         matches(terms, fields: [row.title, row.displayProject])
     }
 
+    /// True when every row matching `terms` also matches `previous`: each
+    /// previous term sits inside the new term at its position. An empty
+    /// `previous` is not a search, so nothing narrows it.
+    static func narrows(_ terms: [String], _ previous: [String]) -> Bool {
+        !previous.isEmpty && terms.count >= previous.count
+            && zip(terms, previous).allSatisfy {
+                $0.range(of: $1, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+            }
+    }
+
     static func matches(_ terms: [String], fields: [String]) -> Bool {
         let haystack = fields.joined(separator: "\n")
         return terms.allSatisfy {

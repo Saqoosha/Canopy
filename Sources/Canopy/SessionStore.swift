@@ -210,11 +210,13 @@ final class SessionStore {
         // caller's observation, so skipping them would stop the sidebar updating.
         let recents = recents, searchIndex = searchIndex, hiddenIds = hiddenIds
         if let cached = closedLocalMatches, cached.terms == terms { return cached.entries }
-        let entries = Self.closedSource(searching: !terms.isEmpty, recents: recents, searchIndex: searchIndex)
-            .filter { entry in
-                !hiddenIds.contains(entry.id)
-                    && (terms.isEmpty || SessionSearch.matches(terms, .closedLocal(entry)))
-            }
+        // A query that narrows the cached one ("gam" → "gamma t") can only keep
+        // rows it already kept, so only those are matched again.
+        let source = closedLocalMatches.flatMap { cached in
+            SessionSearch.narrows(terms, cached.terms) ? cached.entries : nil
+        } ?? Self.closedSource(searching: !terms.isEmpty, recents: recents, searchIndex: searchIndex)
+            .filter { !hiddenIds.contains($0.id) }
+        let entries = terms.isEmpty ? source : source.filter { SessionSearch.matches(terms, .closedLocal($0)) }
         closedLocalMatches = (terms, entries)
         return entries
     }
@@ -833,8 +835,8 @@ final class SessionStore {
     /// while searching (`searchClosedRowLimit`).
     var visibleRows: [SidebarRow] { visibleRowsCounted.rows }
 
-    /// While searching, closed rows past this many (newest first) are left out:
-    /// the List's per-keystroke diff grows with the row count.
+    /// While searching, closed local rows past this many (newest first) are left
+    /// out: the List's per-keystroke diff grows with the row count.
     static let searchClosedRowLimit = 100
 
     /// `visibleRows`, plus how many closed rows `searchClosedRowLimit` left out.
@@ -864,10 +866,14 @@ final class SessionStore {
         var shown = filter.apply(to: sorted)
         var overflow = 0
         if !terms.isEmpty {
-            // `sorted` puts the open block first and the closed rows newest first.
-            let closedCount = shown.count - shown.prefix(while: \.isOpen).count
-            overflow = max(0, closedCount - Self.searchClosedRowLimit)
-            shown.removeLast(overflow)
+            // Closed local rows are newest first in `sorted`; keep the first ones.
+            var kept = 0
+            shown.removeAll { row in
+                guard case .closedLocal = row else { return false }
+                kept += 1
+                return kept > Self.searchClosedRowLimit
+            }
+            overflow = max(0, kept - Self.searchClosedRowLimit)
         }
         return (Self.interleavingLaunchers(into: shown, panes: panes), overflow)
     }
@@ -3777,6 +3783,10 @@ final class SessionStore {
 
     func _probeSeedSearchIndex(_ entries: [SessionEntry]) {
         searchIndex = entries
+    }
+
+    func _probeSeedCloud(_ sessions: [RemoteSession]) {
+        cloud = sessions
     }
 
     /// Probe-only: park a snapshot the way `makeRestored()` does, without
