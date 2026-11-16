@@ -839,7 +839,7 @@ final class SessionStore {
     /// out: the List's per-keystroke diff grows with the row count.
     static let searchClosedRowLimit = 100
 
-    /// `visibleRows`, plus how many closed rows `searchClosedRowLimit` left out.
+    /// `visibleRows`, plus how many closed local rows `searchClosedRowLimit` left out.
     var visibleRowsCounted: (rows: [SidebarRow], overflow: Int) {
         // Drop any closed local row whose JSONL id is also currently open —
         // the open row is the live representation; showing the recents copy
@@ -867,13 +867,17 @@ final class SessionStore {
         var overflow = 0
         if !terms.isEmpty {
             // Closed local rows are newest first in `sorted`; keep the first ones.
-            var kept = 0
-            shown.removeAll { row in
-                guard case .closedLocal = row else { return false }
-                kept += 1
-                return kept > Self.searchClosedRowLimit
+            var seen = 0
+            var capped: [SidebarRow] = []
+            for row in shown {
+                if case .closedLocal = row {
+                    seen += 1
+                    if seen > Self.searchClosedRowLimit { continue }
+                }
+                capped.append(row)
             }
-            overflow = max(0, kept - Self.searchClosedRowLimit)
+            shown = capped
+            overflow = max(0, seen - Self.searchClosedRowLimit)
         }
         return (Self.interleavingLaunchers(into: shown, panes: panes), overflow)
     }

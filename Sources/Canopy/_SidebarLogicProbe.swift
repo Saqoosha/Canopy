@@ -8135,9 +8135,15 @@ enum SidebarLogicProbe {
             // A query that narrows the last one matches only its rows; any other
             // query starts from every row again.
             do {
-                record("search narrows: a longer term, more terms, any case",
-                       SessionSearch.narrows(["gamma"], ["gam"]) && SessionSearch.narrows(["gamma", "o"], ["gamma"])
-                           && SessionSearch.narrows(["GAMMA"], ["gam"]))
+                let q = SessionSearch.terms
+                record("search narrows: a longer term, more terms, any case, any order",
+                       SessionSearch.narrows(q("gamma"), q("gam")) && SessionSearch.narrows(q("gamma o"), q("gamma"))
+                           && SessionSearch.narrows(q("GAMMA"), q("gam")) && SessionSearch.narrows(q("canopy mirror"), q("mirr")))
+                // Folding makes containment transitive: unfolded, "ß" matched "ss" but
+                // not "s", so typing s → ss narrowed "Fußball" away.
+                record("search narrows: a row matching the narrower query matched the wider one",
+                       SessionSearch.narrows(q("ss"), q("s")) && SessionSearch.matches(q("ss"), fields: ["Fußball"])
+                           && SessionSearch.matches(q("s"), fields: ["Fußball"]))
                 record("search narrows: a different term, fewer terms, or no previous query do not",
                        !SessionSearch.narrows(["gamma"], ["two"]) && !SessionSearch.narrows(["gamma"], ["gamma", "o"])
                            && !SessionSearch.narrows(["gamma"], []))
