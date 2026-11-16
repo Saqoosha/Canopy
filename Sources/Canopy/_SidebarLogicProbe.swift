@@ -5579,6 +5579,25 @@ enum SidebarLogicProbe {
             record("move: a relative path is refused, even one that names a folder",
                    SessionMove.refusal(isRemote: false, isInWorktree: false, path: "real", isDirectory: { _ in true }) != nil)
             record("move: a missing folder is refused", refusal(path: "/missing") != nil)
+            do {
+                // CLI 2.1.325: EnterWorktree leaves the transcript filed under the spawn folder and changes only
+                // the records' cwd, so the folder-based relocation check alone says "not in a worktree".
+                let spawn = "/canopy-probe-missing/repo"
+                let worktree = GitWorktree.worktreesRoot.path + "/repo/wt"
+                let dir = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("canopy-probe-\(UUID().uuidString)")
+                    .appendingPathComponent(ClaudeSessionHistory.encodedFolderCandidates(for: spawn)[0])
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: dir.deletingLastPathComponent()) }
+                let file = dir.appendingPathComponent("s.jsonl")
+                try? Data((#"{"type":"user","cwd":"\#(spawn)"}"# + "\n"
+                    + #"{"type":"user","cwd":"\#(worktree)"}"# + "\n").utf8).write(to: file)
+                record("move: a session that entered a worktree by its records' cwd stays",
+                       SessionMove.isInWorktree(jsonlPath: file.path, workingDirectory: URL(fileURLWithPath: spawn)))
+                try? Data((#"{"type":"user","cwd":"\#(spawn)"}"# + "\n").utf8).write(to: file)
+                record("move: a session still at its spawn folder may move",
+                       !SessionMove.isInWorktree(jsonlPath: file.path, workingDirectory: URL(fileURLWithPath: spawn)))
+            }
 
             // Only the Move button, actually pressed, is a yes.
             let moveButton = CFOptionFlags(kCFUserNotificationAlternateResponse)

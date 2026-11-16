@@ -169,10 +169,11 @@ enum SessionMove {
         return isDirectory(path) ? nil : "\(path) is not a folder."
     }
 
-    /// By the folder the session is really in: it can enter a worktree after it starts.
-    /// Runs `git`, so call it off the main thread.
+    /// By the folder the session is really in: it can enter a worktree after it starts, which on
+    /// CLI 2.1.325 only the records' `cwd` shows (see `ShimProcess.branchDirectory`).
+    /// Reads the transcript and runs `git`, so call it off the main thread.
     static func isInWorktree(jsonlPath: String?, workingDirectory: URL) -> Bool {
-        let effective = ShimProcess.effectiveVCSDirectory(jsonlPath: jsonlPath, workingDirectory: workingDirectory)
+        let effective = ShimProcess.branchDirectory(jsonlPath: jsonlPath, workingDirectory: workingDirectory)
         return GitWorktree.isManagedWorktree(effective) || GitWorktree.checkoutOfWorktreeRoot(effective) != nil
     }
 
