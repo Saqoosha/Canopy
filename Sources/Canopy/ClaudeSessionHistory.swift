@@ -419,10 +419,14 @@ enum ClaudeSessionHistory {
 
         // An uncapped scan fills the metadata cache in parallel first. Serially,
         // a cold cache took 20.7 s for 3,890 transcripts (2026-11-16).
+        // One at a time: a second scan waits, then finds the cache warm instead
+        // of reading the same cold files alongside the first.
         if keep >= candidates.count, scanLimit >= candidates.count {
             let files = candidates.map { ($0.path, $0.modDate) }
-            DispatchQueue.concurrentPerform(iterations: files.count) { i in
-                autoreleasepool { _ = cachedMetadata(path: files[i].0, modified: files[i].1) }
+            prefillLock.withLock {
+                DispatchQueue.concurrentPerform(iterations: files.count) { i in
+                    autoreleasepool { _ = cachedMetadata(path: files[i].0, modified: files[i].1) }
+                }
             }
         }
 
@@ -567,6 +571,7 @@ enum ClaudeSessionHistory {
     private typealias Metadata = (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool, startedAt: Date?, firstPrompt: String?)
     nonisolated(unsafe) private static var metadataCache: [String: (modified: Date, metadata: Metadata)] = [:]
     private static let metadataCacheLock = NSLock()
+    private static let prefillLock = NSLock()
 
     /// `extractMetadata` memoized on (path, mtime). The uncapped search scan
     /// reads every header — measured 6.4–7.0 s for 2,729 files — so only the
