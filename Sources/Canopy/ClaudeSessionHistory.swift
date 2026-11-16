@@ -913,8 +913,7 @@ enum ClaudeSessionHistory {
 
     /// The session's *current* cwd — the directory the CLI would resume into.
     /// Prefers the latest `relocated` event's `relocatedCwd` over the initial
-    /// `cwd` field so sessions that were moved into a git worktree resolve to
-    /// the right project folder. Exposed for the sidebar logic probe.
+    /// `cwd` field. Exposed for the sidebar logic probe.
     static func cwd(atPath path: String) -> String? {
         extractMetadata(fromPath: path).cwd
     }
@@ -954,12 +953,8 @@ enum ClaudeSessionHistory {
         return (found, end)
     }
 
-    /// The `cwd` the CLI stamped on the transcript's last record that has one, and the `relocatedCwd` of
-    /// a `relocated` record written after it, if any.
-    /// On CLI 2.1.325 `EnterWorktree` / `ExitWorktree` change only `cwd`. The transcript stays in its folder
-    /// and no new `relocated` record is written, so `cwd(atPath:)` keeps naming the folder it was filed under.
-    /// The CLI also re-appends the session's last `relocated` record at every turn end, so one written after
-    /// the last `cwd` is not necessarily a new move (`ShimProcess.effectiveVCSDirectory` decides).
+    /// The top-level `cwd` of the transcript's last record that has one, and the `relocatedCwd` of a
+    /// `relocated` record written after it, if any. See `ShimProcess.branchDirectory` for why both.
     /// Reads the tail and widens once when the window holds no record carrying `cwd`.
     static func lastRecordCwd(atPath path: String) -> RecordCwd? {
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
@@ -968,7 +963,7 @@ enum ClaudeSessionHistory {
         for window: UInt64 in [64 << 10, 4 << 20] {
             let start = size > window ? size - window : 0
             guard (try? handle.seek(toOffset: start)) != nil, let data = try? handle.readToEnd() else { return nil }
-            if let found = lastRecordCwd(in: data) { return found }
+            if let found = lastRecordCwd(in: data, startsAtLineBoundary: start == 0) { return found }
             if start == 0 { break }
         }
         return nil
@@ -979,36 +974,22 @@ enum ClaudeSessionHistory {
         var relocatedAfter: String?
     }
 
-    static func lastRecordCwd(in data: Data) -> RecordCwd? {
-        let bytes = [UInt8](data)
-        guard let cwd = lastTopLevelString(key: "cwd", in: bytes) else { return nil }
-        let relocated = lastTopLevelString(key: "relocatedCwd", in: bytes)
-        return RecordCwd(cwd: cwd.value,
-                         relocatedAfter: relocated.flatMap { $0.offset > cwd.offset ? $0.value : nil })
-    }
-
-    /// The last top-level `"<key>":"…"` in `bytes` and its offset. A match is top-level only when the byte
-    /// before it is `{` or `,`: the same text quoted inside a tool result is escaped (`\"cwd\":\"`).
-    private static func lastTopLevelString(key: String, in bytes: [UInt8]) -> (offset: Int, value: String)? {
-        let marker = Array("\"\(key)\":\"".utf8)
-        guard bytes.count > marker.count else { return nil }
-        var i = bytes.count - marker.count
-        while i > 0 {
-            defer { i -= 1 }
-            guard bytes[i] == marker[0], bytes[i - 1] == UInt8(ascii: "{") || bytes[i - 1] == UInt8(ascii: ","),
-                  bytes[i..<(i + marker.count)].elementsEqual(marker) else { continue }
-            let valueStart = i + marker.count - 1   // the opening quote
-            var j = valueStart + 1
-            var escaped = false
-            while j < bytes.count {
-                if escaped { escaped = false } else if bytes[j] == UInt8(ascii: "\\") { escaped = true } else if bytes[j] == UInt8(ascii: "\"") { break }
-                j += 1
+    /// Parses whole lines from the end. Only the top-level keys count: nested objects such as
+    /// `wireIngestContext` carry their own `cwd` (measured in 102 of 300 recent transcripts).
+    static func lastRecordCwd(in data: Data, startsAtLineBoundary: Bool) -> RecordCwd? {
+        var lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
+        if !startsAtLineBoundary, !lines.isEmpty { lines.removeFirst() }
+        let marker = Array("Cwd\":".utf8), cwdMarker = Array("\"cwd\":".utf8)
+        var relocatedAfter: String?
+        for line in lines.reversed() where contains(line, cwdMarker) || contains(line, marker) {
+            guard let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
+            if json["type"] as? String == "relocated" {
+                if relocatedAfter == nil, let moved = json["relocatedCwd"] as? String, !moved.isEmpty {
+                    relocatedAfter = moved
+                }
+            } else if let cwd = json["cwd"] as? String, !cwd.isEmpty {
+                return RecordCwd(cwd: cwd, relocatedAfter: relocatedAfter)
             }
-            guard j < bytes.count,
-                  let value = try? JSONSerialization.jsonObject(
-                      with: Data(bytes[valueStart...j]), options: .fragmentsAllowed) as? String,
-                  !value.isEmpty else { continue }
-            return (i, value)
         }
         return nil
     }

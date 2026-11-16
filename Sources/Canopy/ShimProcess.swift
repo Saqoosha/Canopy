@@ -2720,7 +2720,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let isLocal = remoteHost == nil
         nonisolated(unsafe) let barData = statusBarData
         DispatchQueue.global(qos: .utility).async {
-            let effective = Self.effectiveVCSDirectory(
+            let effective = Self.branchDirectory(
                 sessionId: sid, isLocal: isLocal, workingDirectory: dir
             )
             let vcsInfo = Self.detectVCSInfo(at: effective)
@@ -7163,16 +7163,34 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// resolved and cached the path on the main actor, so it must not re-run
     /// the lookup. Taking the path rather than a session id is what keeps that
     /// site from passing a placeholder id to satisfy a signature.
-    ///
-    /// The last record's `cwd` comes first. On CLI 2.1.325 `EnterWorktree`
-    /// leaves the transcript in its folder and writes no `relocated` record,
-    /// so `relocated` alone answers "did not move" for a session sitting in a
-    /// worktree. A `relocated` record written after that `cwd` wins only when
-    /// the `cwd` is not a worktree: the CLI re-appends the session's last
-    /// `relocated` at every turn end (measured on a real transcript, after the
-    /// worktree's own records), and a session in a worktree cannot be moved
-    /// (`SessionMove`), so after a worktree `cwd` it is always the stale one.
     static func effectiveVCSDirectory(
+        jsonlPath: String?,
+        workingDirectory: URL,
+        relocated: (String, URL) -> URL? = {
+            ShimProcess.relocatedWorkingDirectory(jsonlPath: $0, workingDirectory: $1)
+        }
+    ) -> URL {
+        guard let jsonlPath else { return workingDirectory }
+        return relocated(jsonlPath, workingDirectory) ?? workingDirectory
+    }
+
+    /// The directory the branch label reads: the last record's `cwd`, else `effectiveVCSDirectory`.
+    /// On CLI 2.1.325 `EnterWorktree` changes only the records' `cwd` (no `relocated`, the transcript
+    /// stays in its folder), and a Bash `cd` moves it into a subdirectory, which `git` reads the same.
+    /// The CLI re-appends the session's last `relocated` at every turn end, after those records, so a
+    /// `relocated` after the `cwd` wins only when the `cwd` is outside it and not in a worktree:
+    /// a fresh move-session, whose new `cwd` arrives with the next turn.
+    static func branchDirectory(
+        sessionId: String?,
+        isLocal: Bool,
+        workingDirectory: URL,
+        lookup: (String, URL) -> String? = { ShimProcess.jsonlPath(sessionId: $0, workingDirectory: $1) }
+    ) -> URL {
+        guard isLocal, let sessionId, !sessionId.isEmpty else { return workingDirectory }
+        return branchDirectory(jsonlPath: lookup(sessionId, workingDirectory), workingDirectory: workingDirectory)
+    }
+
+    static func branchDirectory(
         jsonlPath: String?,
         workingDirectory: URL,
         recordCwd: (String) -> ClaudeSessionHistory.RecordCwd? = { ClaudeSessionHistory.lastRecordCwd(atPath: $0) },
@@ -7180,15 +7198,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             ShimProcess.relocatedWorkingDirectory(jsonlPath: $0, workingDirectory: $1)
         }
     ) -> URL {
-        guard let jsonlPath else { return workingDirectory }
-        if let record = recordCwd(jsonlPath) {
-            let cwd = URL(fileURLWithPath: record.cwd)
-            if let moved = record.relocatedAfter, !GitWorktree.isManagedWorktree(cwd) {
-                return URL(fileURLWithPath: moved)
-            }
-            return cwd
+        guard let jsonlPath, let record = recordCwd(jsonlPath) else {
+            return effectiveVCSDirectory(jsonlPath: jsonlPath, workingDirectory: workingDirectory, relocated: relocated)
         }
-        return relocated(jsonlPath, workingDirectory) ?? workingDirectory
+        let cwd = URL(fileURLWithPath: record.cwd).standardizedFileURL
+        guard let moved = record.relocatedAfter else { return cwd }
+        let movedPath = URL(fileURLWithPath: moved).standardizedFileURL.path
+        let insideMove = cwd.path == movedPath || cwd.path.hasPrefix(movedPath + "/")
+        var inWorktree = false
+        var dir = cwd
+        while dir.path != "/" && !inWorktree {
+            inWorktree = GitWorktree.isManagedWorktree(dir)
+            dir = dir.deletingLastPathComponent()
+        }
+        return insideMove || inWorktree ? cwd : URL(fileURLWithPath: movedPath)
     }
 
     /// The directory a session has MOVED to since spawn, or nil when it is
@@ -8396,7 +8419,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // injects it rather than re-running `jsonlPath` off-main.
             let logPath = sessionJSONLPath()
             DispatchQueue.global(qos: .utility).async { [weak self] in
-                let effective = Self.effectiveVCSDirectory(
+                let effective = Self.branchDirectory(
                     jsonlPath: logPath, workingDirectory: dir
                 )
                 let vcsInfo = Self.detectVCSInfo(at: effective)
