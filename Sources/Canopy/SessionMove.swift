@@ -171,9 +171,12 @@ enum SessionMove {
 
     /// By the folder the session is really in: it can enter a worktree after it starts, which on
     /// CLI 2.1.325 only the records' `cwd` shows (see `ShimProcess.branchDirectory`).
+    /// A removed worktree does not count: the last `cwd` still names it until the next turn.
     /// Reads the transcript and runs `git`, so call it off the main thread.
-    static func isInWorktree(jsonlPath: String?, workingDirectory: URL) -> Bool {
+    static func isInWorktree(jsonlPath: String?, workingDirectory: URL,
+                             exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> Bool {
         let effective = ShimProcess.branchDirectory(jsonlPath: jsonlPath, workingDirectory: workingDirectory)
+        guard exists(effective.path) else { return false }
         return GitWorktree.isManagedWorktree(effective) || GitWorktree.checkoutOfWorktreeRoot(effective) != nil
     }
 

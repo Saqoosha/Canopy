@@ -5593,10 +5593,11 @@ enum SidebarLogicProbe {
                 try? Data((#"{"type":"user","cwd":"\#(spawn)"}"# + "\n"
                     + #"{"type":"user","cwd":"\#(worktree)"}"# + "\n").utf8).write(to: file)
                 record("move: a session that entered a worktree by its records' cwd stays",
-                       SessionMove.isInWorktree(jsonlPath: file.path, workingDirectory: URL(fileURLWithPath: spawn)))
-                try? Data((#"{"type":"user","cwd":"\#(spawn)"}"# + "\n").utf8).write(to: file)
-                record("move: a session still at its spawn folder may move",
-                       !SessionMove.isInWorktree(jsonlPath: file.path, workingDirectory: URL(fileURLWithPath: spawn)))
+                       SessionMove.isInWorktree(jsonlPath: file.path, workingDirectory: URL(fileURLWithPath: spawn),
+                                                exists: { _ in true }))
+                record("move: a worktree removed since the last record does not hold the session",
+                       !SessionMove.isInWorktree(jsonlPath: file.path, workingDirectory: URL(fileURLWithPath: spawn),
+                                                 exists: { $0 != worktree }))
             }
 
             // Only the Move button, actually pressed, is a yes.
