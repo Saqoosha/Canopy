@@ -31,6 +31,10 @@ struct Sidebar: View {
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
+        // Once per body; the List and the open-block animation key share it.
+        let counted = store.visibleRowsCounted
+        let rows = counted.rows
+        let openRowIdentity = rows.filter(\.isOpen).map(\.id)
         VStack(spacing: 0) {
             // Top: + New session / search + filter / grouping mode, all
             // sharing one leading and trailing edge.
@@ -59,7 +63,6 @@ struct Sidebar: View {
             // tap gesture (they don't drag, and routing them through
             // selection would also fire on right-click).
             List(selection: rowClickBinding) {
-                let rows = store.visibleRows
                 let openRows = rows.filter(\.isOpen)
                 let closedRows = rows.filter { !$0.isOpen }
                 let closedSections = SidebarGrouping.sections(from: closedRows, mode: store.groupingMode)
@@ -102,6 +105,16 @@ struct Sidebar: View {
                         }
                     }
                 }
+                if counted.overflow > 0 {
+                    Section {
+                        Text("\(counted.overflow) older \(counted.overflow == 1 ? "match" : "matches") not shown. Type more to narrow the search.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
+                            .selectionDisabled()
+                    }
+                }
                 // A launcher pane always contributes a row, so `rows.isEmpty`
                 // stopped being reachable while one is open — and with it the
                 // "No sessions yet." / "No sessions match your filter." state,
@@ -132,7 +145,7 @@ struct Sidebar: View {
             // resizes the window in one synchronous frame instead.
             //
             // Only a pure reorder animates; see `openRowAnimation`.
-            .animation(openRowAnimation, value: openRowIdentity)
+            .animation(openRowAnimation(openRowIdentity), value: openRowIdentity)
             .onChange(of: openRowIdentity, initial: true) { _, ids in lastOpenRowIdentity = ids }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
@@ -649,16 +662,6 @@ struct Sidebar: View {
         }
     }
 
-    /// Animation key for the open block. This re-runs the whole `visibleRows`
-    /// pipeline — dedup, sort, filter, interleave — since that property caches
-    /// nothing and the List body's own `rows` is a different evaluation. Kept
-    /// anyway: keying on `panes` + the session order would miss a launcher
-    /// sliding to a new anchor because the VISIBLE session set changed (a
-    /// filter edit, a hide) while neither of those did.
-    private var openRowIdentity: [String] {
-        store.visibleRows.filter(\.isOpen).map(\.id)
-    }
-
     /// Animates the open block only when its rows are the same set in a new
     /// order. A row arriving or leaving — a session opened from the phone, a
     /// close — is applied without animation, because that change usually
@@ -669,7 +672,7 @@ struct Sidebar: View {
     /// Seen intermittently (2 of 15 synthetic runs, 0 of 15 with this gate),
     /// and only with an open block that was already non-empty: an empty one
     /// inserts the whole Open section instead.
-    private var openRowAnimation: Animation? {
+    private func openRowAnimation(_ openRowIdentity: [String]) -> Animation? {
         Set(openRowIdentity) == Set(lastOpenRowIdentity) ? .easeInOut(duration: 0.2) : nil
     }
 

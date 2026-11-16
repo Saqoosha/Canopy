@@ -417,6 +417,15 @@ enum ClaudeSessionHistory {
         // `resolveProjectPath` (extracted cwd vs storage-folder encoding).
         candidates.sort { $0.modDate > $1.modDate }
 
+        // An uncapped scan fills the metadata cache in parallel first. Serially,
+        // a cold cache took 20.7 s for 3,890 transcripts (2026-11-16).
+        if keep >= candidates.count, scanLimit >= candidates.count {
+            let files = candidates.map { ($0.path, $0.modDate) }
+            DispatchQueue.concurrentPerform(iterations: files.count) { i in
+                autoreleasepool { _ = cachedMetadata(path: files[i].0, modified: files[i].1) }
+            }
+        }
+
         let selection = selectNewest(
             candidates,
             keep: keep,
@@ -915,27 +924,38 @@ enum ClaudeSessionHistory {
         let size = (try? handle.seekToEnd()) ?? 0
         var end = offset <= size ? offset : 0
         guard (try? handle.seek(toOffset: end)) != nil else { return (nil, offset) }
-        let marker = Data("relocatedCwd".utf8)
+        let marker = Array("relocatedCwd".utf8)
         var carry = Data()
         var found: String?
         while let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+            // `carry` holds no newline, so only the new bytes need searching.
+            let chunkStart = carry.endIndex
             carry.append(chunk)
-            // One copy of the remainder per chunk, not per line.
-            var cursor = carry.startIndex
-            while let newline = carry[cursor...].firstIndex(of: 0x0A) {
-                let line = carry[cursor..<newline]
-                end += UInt64(line.count + 1)
-                cursor = carry.index(after: newline)
-                if line.range(of: marker) != nil,
-                   let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-                   json["type"] as? String == "relocated",
-                   let value = json["relocatedCwd"] as? String, !value.isEmpty {
-                    found = value
+            guard let lastNewline = carry[chunkStart...].lastIndex(of: 0x0A) else { continue }
+            let complete = carry[carry.startIndex...lastNewline]
+            end += UInt64(complete.count)
+            // Search once per chunk and split into lines only on a hit.
+            if contains(complete, marker) {
+                for line in complete.split(separator: 0x0A) where contains(line, marker) {
+                    if let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                       json["type"] as? String == "relocated",
+                       let value = json["relocatedCwd"] as? String, !value.isEmpty {
+                        found = value
+                    }
                 }
             }
-            carry = Data(carry[cursor...])
+            carry = Data(carry[carry.index(after: lastNewline)...])
         }
         return (found, end)
+    }
+
+    private static func contains(_ data: Data, _ marker: [UInt8]) -> Bool {
+        data.withUnsafeBytes { bytes in
+            marker.withUnsafeBytes { needle in
+                guard let base = bytes.baseAddress, bytes.count >= needle.count else { return false }
+                return memmem(base, bytes.count, needle.baseAddress, needle.count) != nil
+            }
+        }
     }
 
     /// The model and permission mode a session last ran with, as its transcript records them:
