@@ -1453,34 +1453,34 @@ enum SidebarLogicProbe {
         let vcsFrozen = URL(fileURLWithPath: "/tmp/probe/vcs-frozen")
         let vcsMoved = URL(fileURLWithPath: "/tmp/probe/vcs-moved")
         record("vcs dir: a remote session never leaves the frozen directory",
-               ShimProcess.effectiveVCSDirectory(
+               ShimProcess.branchDirectory(
                    sessionId: "sid", isLocal: false, workingDirectory: vcsFrozen,
-                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, relocated: { _, _ in vcsMoved }
+                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, recordCwd: { _ in nil }, relocated: { _, _ in vcsMoved }
                ) == vcsFrozen)
         record("vcs dir: no session id yet leaves the frozen directory",
-               ShimProcess.effectiveVCSDirectory(
+               ShimProcess.branchDirectory(
                    sessionId: nil, isLocal: true, workingDirectory: vcsFrozen,
-                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, relocated: { _, _ in vcsMoved }
+                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, recordCwd: { _ in nil }, relocated: { _, _ in vcsMoved }
                ) == vcsFrozen)
         record("vcs dir: an empty session id leaves the frozen directory",
-               ShimProcess.effectiveVCSDirectory(
+               ShimProcess.branchDirectory(
                    sessionId: "", isLocal: true, workingDirectory: vcsFrozen,
-                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, relocated: { _, _ in vcsMoved }
+                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, recordCwd: { _ in nil }, relocated: { _, _ in vcsMoved }
                ) == vcsFrozen)
         record("vcs dir: an unresolvable transcript leaves the frozen directory",
-               ShimProcess.effectiveVCSDirectory(
+               ShimProcess.branchDirectory(
                    sessionId: "sid", isLocal: true, workingDirectory: vcsFrozen,
-                   lookup: { _, _ in nil }, relocated: { _, _ in vcsMoved }
+                   lookup: { _, _ in nil }, recordCwd: { _ in nil }, relocated: { _, _ in vcsMoved }
                ) == vcsFrozen)
         record("vcs dir: a session that did not move leaves the frozen directory",
-               ShimProcess.effectiveVCSDirectory(
+               ShimProcess.branchDirectory(
                    sessionId: "sid", isLocal: true, workingDirectory: vcsFrozen,
-                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, relocated: { _, _ in nil }
+                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, recordCwd: { _ in nil }, relocated: { _, _ in nil }
                ) == vcsFrozen)
         record("vcs dir: a relocated session reads from where it moved to",
-               ShimProcess.effectiveVCSDirectory(
+               ShimProcess.branchDirectory(
                    sessionId: "sid", isLocal: true, workingDirectory: vcsFrozen,
-                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, relocated: { _, _ in vcsMoved }
+                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, recordCwd: { _ in nil }, relocated: { _, _ in vcsMoved }
                ) == vcsMoved)
         // The per-turn overload skips the lookup entirely, because that site
         // has already resolved and cached the path on the main actor.
@@ -1510,6 +1510,16 @@ enum SidebarLogicProbe {
                    == GitWorktree.worktreesRoot.path + "/repo/wt/Sources")
         record("branch dir: a cwd inside the relocated folder (a Bash cd) wins",
                branchDir("/tmp/probe/repo/Sources", after: "/tmp/probe/repo") == "/tmp/probe/repo/Sources")
+        do {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-link-\(UUID().uuidString)")
+            let real = root.appendingPathComponent("real"), link = root.appendingPathComponent("link")
+            try? FileManager.default.createDirectory(at: real.appendingPathComponent("Sources"), withIntermediateDirectories: true)
+            try? FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let viaLink = link.appendingPathComponent("Sources").standardizedFileURL.path
+            record("branch dir: a cwd inside the relocated folder spelled through a symlink still wins",
+                   branchDir(viaLink, after: real.standardizedFileURL.path) == viaLink)
+        }
         record("branch dir: a relocated record after an unrelated cwd is a fresh move",
                branchDir("/tmp/probe/no-folder", after: "/tmp/probe/repo") == "/tmp/probe/repo")
         record("branch dir: a record cwd with nothing after it is where the session is",
