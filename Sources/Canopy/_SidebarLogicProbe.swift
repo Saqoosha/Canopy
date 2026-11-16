@@ -1520,6 +1520,10 @@ enum SidebarLogicProbe {
             record("branch dir: a cwd inside the relocated folder spelled through a symlink still wins",
                    branchDir(viaLink, after: real.standardizedFileURL.path) == viaLink)
         }
+        record("vcs root: a subdirectory reads from the ancestor holding .jj",
+               ShimProcess.vcsRoot(of: URL(fileURLWithPath: "/r/a/b"), exists: { $0 == "/r/.jj" }).path == "/r")
+        record("vcs root: no VCS above leaves the directory as given",
+               ShimProcess.vcsRoot(of: URL(fileURLWithPath: "/r/a/b"), exists: { _ in false }).path == "/r/a/b")
         record("branch dir: a relocated record after an unrelated cwd is a fresh move",
                branchDir("/tmp/probe/no-folder", after: "/tmp/probe/repo") == "/tmp/probe/repo")
         record("branch dir: a record cwd with nothing after it is where the session is",

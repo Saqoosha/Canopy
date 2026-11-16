@@ -7160,6 +7160,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                recordCwd: recordCwd, relocated: relocated)
     }
 
+    /// The nearest ancestor-or-self holding `.jj` or `.git`, else `dir`: `detectVCSInfo` looks for `.jj`
+    /// only in the directory it is given, so a jj-colocated repo read from a subdirectory falls to git's
+    /// detached HEAD and the label goes blank.
+    static func vcsRoot(of dir: URL, exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> URL {
+        var candidate = dir
+        while candidate.path != "/" {
+            if exists(candidate.appendingPathComponent(".jj").path) || exists(candidate.appendingPathComponent(".git").path) {
+                return candidate
+            }
+            candidate = candidate.deletingLastPathComponent()
+        }
+        return dir
+    }
+
     static func branchDirectory(
         jsonlPath: String?,
         workingDirectory: URL,
@@ -7171,7 +7185,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         guard let jsonlPath, let record = recordCwd(jsonlPath) else {
             return effectiveVCSDirectory(jsonlPath: jsonlPath, workingDirectory: workingDirectory, relocated: relocated)
         }
-        let cwd = URL(fileURLWithPath: record.cwd).standardizedFileURL
+        let cwd = vcsRoot(of: URL(fileURLWithPath: record.cwd).standardizedFileURL)
         guard let moved = record.relocatedAfter else { return cwd }
         let movedPath = URL(fileURLWithPath: moved).standardizedFileURL.path
         // Resolved, since `~/Documents/repos` → `~/repos` spellings both occur here.
