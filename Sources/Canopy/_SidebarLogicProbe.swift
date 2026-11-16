@@ -1453,34 +1453,34 @@ enum SidebarLogicProbe {
         let vcsFrozen = URL(fileURLWithPath: "/tmp/probe/vcs-frozen")
         let vcsMoved = URL(fileURLWithPath: "/tmp/probe/vcs-moved")
         record("vcs dir: a remote session never leaves the frozen directory",
-               ShimProcess.effectiveVCSDirectory(
+               ShimProcess.branchDirectory(
                    sessionId: "sid", isLocal: false, workingDirectory: vcsFrozen,
-                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, relocated: { _, _ in vcsMoved }
+                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, recordCwd: { _ in nil }, relocated: { _, _ in vcsMoved }
                ) == vcsFrozen)
         record("vcs dir: no session id yet leaves the frozen directory",
-               ShimProcess.effectiveVCSDirectory(
+               ShimProcess.branchDirectory(
                    sessionId: nil, isLocal: true, workingDirectory: vcsFrozen,
-                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, relocated: { _, _ in vcsMoved }
+                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, recordCwd: { _ in nil }, relocated: { _, _ in vcsMoved }
                ) == vcsFrozen)
         record("vcs dir: an empty session id leaves the frozen directory",
-               ShimProcess.effectiveVCSDirectory(
+               ShimProcess.branchDirectory(
                    sessionId: "", isLocal: true, workingDirectory: vcsFrozen,
-                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, relocated: { _, _ in vcsMoved }
+                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, recordCwd: { _ in nil }, relocated: { _, _ in vcsMoved }
                ) == vcsFrozen)
         record("vcs dir: an unresolvable transcript leaves the frozen directory",
-               ShimProcess.effectiveVCSDirectory(
+               ShimProcess.branchDirectory(
                    sessionId: "sid", isLocal: true, workingDirectory: vcsFrozen,
-                   lookup: { _, _ in nil }, relocated: { _, _ in vcsMoved }
+                   lookup: { _, _ in nil }, recordCwd: { _ in nil }, relocated: { _, _ in vcsMoved }
                ) == vcsFrozen)
         record("vcs dir: a session that did not move leaves the frozen directory",
-               ShimProcess.effectiveVCSDirectory(
+               ShimProcess.branchDirectory(
                    sessionId: "sid", isLocal: true, workingDirectory: vcsFrozen,
-                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, relocated: { _, _ in nil }
+                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, recordCwd: { _ in nil }, relocated: { _, _ in nil }
                ) == vcsFrozen)
         record("vcs dir: a relocated session reads from where it moved to",
-               ShimProcess.effectiveVCSDirectory(
+               ShimProcess.branchDirectory(
                    sessionId: "sid", isLocal: true, workingDirectory: vcsFrozen,
-                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, relocated: { _, _ in vcsMoved }
+                   lookup: { _, _ in "/tmp/probe/found.jsonl" }, recordCwd: { _ in nil }, relocated: { _, _ in vcsMoved }
                ) == vcsMoved)
         // The per-turn overload skips the lookup entirely, because that site
         // has already resolved and cached the path on the main actor.
@@ -1494,6 +1494,85 @@ enum SidebarLogicProbe {
                    jsonlPath: nil, workingDirectory: vcsFrozen,
                    relocated: { _, _ in vcsMoved }
                ) == vcsFrozen)
+        // CLI 2.1.325: EnterWorktree changes only the records' `cwd`, while a
+        // stale `relocated` from an earlier move-session keeps being re-appended.
+        let vcsPath = "/tmp/probe/found.jsonl"
+        func branchDir(_ cwd: String, after: String?) -> String {
+            ShimProcess.branchDirectory(
+                jsonlPath: vcsPath, workingDirectory: vcsFrozen,
+                recordCwd: { _ in .init(cwd: cwd, relocatedAfter: after) }, relocated: { _, _ in vcsMoved }
+            ).path
+        }
+        record("branch dir: a worktree cwd wins over a relocated record re-appended after it",
+               branchDir("/tmp/probe/repo/.claude/worktrees/wt", after: "/tmp/probe/repo") == "/tmp/probe/repo/.claude/worktrees/wt")
+        record("branch dir: a subdirectory of a managed worktree outside the repo still wins",
+               branchDir(GitWorktree.worktreesRoot.path + "/repo/wt/Sources", after: "/tmp/probe/repo")
+                   == GitWorktree.worktreesRoot.path + "/repo/wt/Sources")
+        record("branch dir: a cwd inside the relocated folder (a Bash cd) wins",
+               branchDir("/tmp/probe/repo/Sources", after: "/tmp/probe/repo") == "/tmp/probe/repo/Sources")
+        do {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("canopy-probe-link-\(UUID().uuidString)")
+            let real = root.appendingPathComponent("real"), link = root.appendingPathComponent("link")
+            try? FileManager.default.createDirectory(at: real.appendingPathComponent("Sources"), withIntermediateDirectories: true)
+            try? FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let viaLink = link.appendingPathComponent("Sources").standardizedFileURL.path
+            record("branch dir: a cwd inside the relocated folder spelled through a symlink still wins",
+                   branchDir(viaLink, after: real.standardizedFileURL.path) == viaLink)
+        }
+        record("vcs root: a subdirectory reads from the ancestor holding .jj",
+               ShimProcess.vcsRoot(of: URL(fileURLWithPath: "/r/a/b"), exists: { $0 == "/r/.jj" }).path == "/r")
+        record("vcs root: no VCS above leaves the directory as given",
+               ShimProcess.vcsRoot(of: URL(fileURLWithPath: "/r/a/b"), exists: { _ in false }).path == "/r/a/b")
+        record("branch dir: a relocated record after an unrelated cwd is a fresh move",
+               branchDir("/tmp/probe/no-folder", after: "/tmp/probe/repo") == "/tmp/probe/repo")
+        record("branch dir: a record cwd with nothing after it is where the session is",
+               branchDir("/tmp/probe/repo", after: nil) == "/tmp/probe/repo")
+        record("branch dir: no record cwd falls back to the relocated record",
+               ShimProcess.branchDirectory(
+                   jsonlPath: vcsPath, workingDirectory: vcsFrozen,
+                   recordCwd: { _ in nil }, relocated: { _, _ in vcsMoved }
+               ) == vcsMoved)
+        let cwdTail = """
+        {"type":"user","cwd":"/repo","message":"x"}
+        {"type":"user","cwd":"/repo/.claude/worktrees/wt","message":{"content":"tool said {\\"cwd\\":\\"/elsewhere\\"}"}}
+        {"type":"assistant","wireIngestContext":{"toolu_1":{"cwd":"/nested"}},"cwd":"/repo/.claude/worktrees/wt2"}
+        {"type":"relocated","relocatedCwd":"/repo","sessionId":"s"}
+        {"type":"ai-title","title":"t"}
+
+        """
+        record("record cwd: the last top-level cwd, not a nested or escaped one, with the relocated after it",
+               ClaudeSessionHistory.lastRecordCwd(in: Data(cwdTail.utf8), startsAtLineBoundary: true)
+                   == .init(cwd: "/repo/.claude/worktrees/wt2", relocatedAfter: "/repo"))
+        record("record cwd: a relocated record before the last cwd is not reported",
+               ClaudeSessionHistory.lastRecordCwd(in: Data(#"{"type":"relocated","relocatedCwd":"/a"}\#n{"type":"user","cwd":"/b"}"#.utf8),
+                                                  startsAtLineBoundary: true)
+                   == .init(cwd: "/b", relocatedAfter: nil))
+        record("record cwd: a window's cut first line is not read",
+               ClaudeSessionHistory.lastRecordCwd(in: Data(#"{"cwd":"/cut"}\#n{"type":"ai-title"}"#.utf8),
+                                                  startsAtLineBoundary: false) == nil)
+        record("record cwd: an empty relocatedCwd is not a move",
+               ClaudeSessionHistory.lastRecordCwd(in: Data(#"{"cwd":"/a"}\#n{"type":"relocated","relocatedCwd":""}"#.utf8),
+                                                  startsAtLineBoundary: true)
+                   == .init(cwd: "/a", relocatedAfter: nil))
+        do {
+            // The real read through the default closure: the last record's cwd sits more than 64 KB from
+            // EOF, so only the widened window finds it, and the re-appended relocated after it is ignored.
+            let file = FileManager.default.temporaryDirectory
+                .appendingPathComponent("canopy-probe-recordcwd-\(UUID().uuidString).jsonl")
+            defer { try? FileManager.default.removeItem(at: file) }
+            let wt = "/tmp/probe/repo/.claude/worktrees/wt"
+            let lines = #"{"type":"user","cwd":"/tmp/probe/repo"}"# + "\n"
+                + #"{"type":"user","cwd":"\#(wt)","message":{"content":"\#(String(repeating: "z", count: 70_000))"}}"# + "\n"
+                + #"{"type":"relocated","relocatedCwd":"/tmp/probe/repo"}"# + "\n"
+            try? Data(lines.utf8).write(to: file)
+            record("branch dir: the default read widens past 64 KB and follows the worktree",
+                   ShimProcess.branchDirectory(jsonlPath: file.path, workingDirectory: vcsFrozen,
+                                               relocated: { _, _ in vcsMoved }).path == wt)
+        }
+        record("record cwd: a tail with no cwd answers nil",
+               ClaudeSessionHistory.lastRecordCwd(in: Data(#"{"type":"ai-title","title":"t"}"#.utf8),
+                                                  startsAtLineBoundary: true) == nil)
 
         // The resolved-path cache. Its existence check is the whole
         // invalidation strategy and deleting it reintroduces this feature's

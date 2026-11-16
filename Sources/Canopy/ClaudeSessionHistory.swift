@@ -178,9 +178,9 @@ enum ClaudeSessionHistory {
 
     /// Find `<sessionId>.jsonl` under any project folder.
     ///
-    /// The fallback for a session that MOVED. `EnterWorktree` changes the
-    /// CLI's cwd mid-session and the CLI relocates the whole transcript to the
-    /// new directory's encoded folder — measured on 2.1.258, where the old
+    /// The fallback for a session that MOVED. On CLI 2.1.258 `EnterWorktree`
+    /// relocated the whole transcript to the new directory's encoded folder
+    /// (2.1.325 no longer does; see `lastRecordCwd`), and the old
     /// folder was left holding only `memory/` (which was all it had left to
     /// hold; a folder with several sessions keeps the ones that did not move).
     /// Every `encodedFolderCandidates` entry for the ORIGINAL directory then
@@ -913,8 +913,7 @@ enum ClaudeSessionHistory {
 
     /// The session's *current* cwd — the directory the CLI would resume into.
     /// Prefers the latest `relocated` event's `relocatedCwd` over the initial
-    /// `cwd` field so sessions that were moved into a git worktree resolve to
-    /// the right project folder. Exposed for the sidebar logic probe.
+    /// `cwd` field. Exposed for the sidebar logic probe.
     static func cwd(atPath path: String) -> String? {
         extractMetadata(fromPath: path).cwd
     }
@@ -952,6 +951,47 @@ enum ClaudeSessionHistory {
             carry = Data(carry[carry.index(after: lastNewline)...])
         }
         return (found, end)
+    }
+
+    /// The top-level `cwd` of the transcript's last record that has one, and the `relocatedCwd` of a
+    /// `relocated` record written after it, if any. See `ShimProcess.branchDirectory` for why both.
+    /// Reads the tail and widens once when the window holds no record carrying `cwd`.
+    static func lastRecordCwd(atPath path: String) -> RecordCwd? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        for window: UInt64 in [64 << 10, 4 << 20] {
+            let start = size > window ? size - window : 0
+            guard (try? handle.seek(toOffset: start)) != nil, let data = try? handle.readToEnd() else { return nil }
+            if let found = lastRecordCwd(in: data, startsAtLineBoundary: start == 0) { return found }
+            if start == 0 { break }
+        }
+        return nil
+    }
+
+    struct RecordCwd: Equatable {
+        var cwd: String
+        var relocatedAfter: String?
+    }
+
+    /// Parses whole lines from the end. Only the top-level keys count: nested objects such as
+    /// `wireIngestContext` carry their own `cwd` (measured in 102 of 300 recent transcripts).
+    static func lastRecordCwd(in data: Data, startsAtLineBoundary: Bool) -> RecordCwd? {
+        var lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
+        if !startsAtLineBoundary, !lines.isEmpty { lines.removeFirst() }
+        let marker = Array("Cwd\":".utf8), cwdMarker = Array("\"cwd\":".utf8)
+        var relocatedAfter: String?
+        for line in lines.reversed() where contains(line, cwdMarker) || contains(line, marker) {
+            guard let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
+            if json["type"] as? String == "relocated" {
+                if relocatedAfter == nil, let moved = json["relocatedCwd"] as? String, !moved.isEmpty {
+                    relocatedAfter = moved
+                }
+            } else if let cwd = json["cwd"] as? String, !cwd.isEmpty {
+                return RecordCwd(cwd: cwd, relocatedAfter: relocatedAfter)
+            }
+        }
+        return nil
     }
 
     private static func contains(_ data: Data, _ marker: [UInt8]) -> Bool {

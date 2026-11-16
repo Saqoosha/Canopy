@@ -2720,7 +2720,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let isLocal = remoteHost == nil
         nonisolated(unsafe) let barData = statusBarData
         DispatchQueue.global(qos: .utility).async {
-            let effective = Self.effectiveVCSDirectory(
+            let effective = Self.branchDirectory(
                 sessionId: sid, isLocal: isLocal, workingDirectory: dir
             )
             let vcsInfo = Self.detectVCSInfo(at: effective)
@@ -7123,46 +7123,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return ClaudeSessionHistory.scanForTranscript(sessionId: sessionId)
     }
 
-    /// The directory the VCS refresh should actually read, composed from
-    /// `jsonlPath` above and `relocatedWorkingDirectory` below. The `init`
-    /// site calls this form; the per-turn site calls the path-taking overload
-    /// beneath it, having already resolved and cached the path. So the
-    /// composition — the `jsonlPath` → `relocatedWorkingDirectory` chain and
-    /// the fall back to the frozen directory — is pinned once instead of
-    /// duplicated in two shapes neither of which an assertion could reach.
-    ///
-    /// The remote gate below is reached only from the `init` form; the
-    /// per-turn site is gated upstream by `sessionJSONLPath()`'s own
-    /// `remoteHost` guard returning nil. It is not an optimisation. An SSH session's transcript is
-    /// on the other machine, so every local lookup is guaranteed to miss and
-    /// then pay the full scan at each spawn — and worse, if a local transcript
-    /// happens to carry the same id (a teleported session, or one that used to
-    /// run locally) this would hand `detectVCSInfo` a LOCAL directory for a
-    /// REMOTE session and the branch label would be confidently wrong.
-    ///
-    /// `lookup` and `relocated` are injected so the probe can drive the
-    /// composition without a filesystem; the call site takes the defaults.
-    static func effectiveVCSDirectory(
-        sessionId: String?,
-        isLocal: Bool,
-        workingDirectory: URL,
-        lookup: (String, URL) -> String? = { ShimProcess.jsonlPath(sessionId: $0, workingDirectory: $1) },
-        relocated: (String, URL) -> URL? = {
-            ShimProcess.relocatedWorkingDirectory(jsonlPath: $0, workingDirectory: $1)
-        }
-    ) -> URL {
-        guard isLocal, let sessionId, !sessionId.isEmpty else { return workingDirectory }
-        return effectiveVCSDirectory(
-            jsonlPath: lookup(sessionId, workingDirectory),
-            workingDirectory: workingDirectory,
-            relocated: relocated
-        )
-    }
-
-    /// The half of the above that the per-turn site needs: it has already
-    /// resolved and cached the path on the main actor, so it must not re-run
-    /// the lookup. Taking the path rather than a session id is what keeps that
-    /// site from passing a placeholder id to satisfy a signature.
+    /// The directory a session has moved to by `relocated` records, else the frozen one.
     static func effectiveVCSDirectory(
         jsonlPath: String?,
         workingDirectory: URL,
@@ -7172,6 +7133,72 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     ) -> URL {
         guard let jsonlPath else { return workingDirectory }
         return relocated(jsonlPath, workingDirectory) ?? workingDirectory
+    }
+
+    /// The directory the branch label reads: the last record's `cwd`, else `effectiveVCSDirectory`.
+    /// On CLI 2.1.325 `EnterWorktree` changes only the records' `cwd` (no `relocated`, the transcript
+    /// stays in its folder), and a Bash `cd` moves it into a subdirectory, which `git` reads the same.
+    /// The CLI re-appends the session's last `relocated` at every turn end, after those records, so a
+    /// `relocated` after the `cwd` wins only when the `cwd` is outside it and not in a worktree:
+    /// a fresh move-session, whose new `cwd` arrives with the next turn.
+    ///
+    /// The `init` site calls the session-id form, the per-turn site the path form with its cached path.
+    /// The remote gate is not an optimisation: an SSH session's transcript is on the other machine, and a
+    /// local transcript with the same id would hand `detectVCSInfo` a LOCAL directory for a REMOTE session.
+    static func branchDirectory(
+        sessionId: String?,
+        isLocal: Bool,
+        workingDirectory: URL,
+        lookup: (String, URL) -> String? = { ShimProcess.jsonlPath(sessionId: $0, workingDirectory: $1) },
+        recordCwd: (String) -> ClaudeSessionHistory.RecordCwd? = { ClaudeSessionHistory.lastRecordCwd(atPath: $0) },
+        relocated: (String, URL) -> URL? = {
+            ShimProcess.relocatedWorkingDirectory(jsonlPath: $0, workingDirectory: $1)
+        }
+    ) -> URL {
+        guard isLocal, let sessionId, !sessionId.isEmpty else { return workingDirectory }
+        return branchDirectory(jsonlPath: lookup(sessionId, workingDirectory), workingDirectory: workingDirectory,
+                               recordCwd: recordCwd, relocated: relocated)
+    }
+
+    /// The nearest ancestor-or-self holding `.jj` or `.git`, else `dir`: `detectVCSInfo` looks for `.jj`
+    /// only in the directory it is given, so a jj-colocated repo read from a subdirectory falls to git's
+    /// detached HEAD and the label goes blank.
+    static func vcsRoot(of dir: URL, exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> URL {
+        var candidate = dir
+        while candidate.path != "/" {
+            if exists(candidate.appendingPathComponent(".jj").path) || exists(candidate.appendingPathComponent(".git").path) {
+                return candidate
+            }
+            candidate = candidate.deletingLastPathComponent()
+        }
+        return dir
+    }
+
+    static func branchDirectory(
+        jsonlPath: String?,
+        workingDirectory: URL,
+        recordCwd: (String) -> ClaudeSessionHistory.RecordCwd? = { ClaudeSessionHistory.lastRecordCwd(atPath: $0) },
+        relocated: (String, URL) -> URL? = {
+            ShimProcess.relocatedWorkingDirectory(jsonlPath: $0, workingDirectory: $1)
+        }
+    ) -> URL {
+        guard let jsonlPath, let record = recordCwd(jsonlPath) else {
+            return effectiveVCSDirectory(jsonlPath: jsonlPath, workingDirectory: workingDirectory, relocated: relocated)
+        }
+        let cwd = vcsRoot(of: URL(fileURLWithPath: record.cwd).standardizedFileURL)
+        guard let moved = record.relocatedAfter else { return cwd }
+        let movedPath = URL(fileURLWithPath: moved).standardizedFileURL.path
+        // Resolved, since `~/Documents/repos` → `~/repos` spellings both occur here.
+        let realCwd = cwd.resolvingSymlinksInPath().path
+        let realMoved = URL(fileURLWithPath: movedPath).resolvingSymlinksInPath().path
+        let insideMove = realCwd == realMoved || realCwd.hasPrefix(realMoved + "/")
+        var inWorktree = false
+        var dir = cwd
+        while dir.path != "/" && !inWorktree {
+            inWorktree = GitWorktree.isManagedWorktree(dir)
+            dir = dir.deletingLastPathComponent()
+        }
+        return insideMove || inWorktree ? cwd : URL(fileURLWithPath: movedPath)
     }
 
     /// The directory a session has MOVED to since spawn, or nil when it is
@@ -8379,7 +8406,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // injects it rather than re-running `jsonlPath` off-main.
             let logPath = sessionJSONLPath()
             DispatchQueue.global(qos: .utility).async { [weak self] in
-                let effective = Self.effectiveVCSDirectory(
+                let effective = Self.branchDirectory(
                     jsonlPath: logPath, workingDirectory: dir
                 )
                 let vcsInfo = Self.detectVCSInfo(at: effective)
