@@ -8144,9 +8144,11 @@ enum SidebarLogicProbe {
                 record("search narrows: a row matching the narrower query matched the wider one",
                        SessionSearch.narrows(q("ss"), q("s")) && SessionSearch.matches(q("ss"), fields: ["Fußball"])
                            && SessionSearch.matches(q("s"), fields: ["Fußball"]))
+                record("search: an NFD project name matches an NFC query",
+                       SessionSearch.matches(q("がぎ"), fields: ["がぎ".decomposedStringWithCanonicalMapping]))
                 record("search narrows: a different term, fewer terms, or no previous query do not",
-                       !SessionSearch.narrows(["gamma"], ["two"]) && !SessionSearch.narrows(["gamma"], ["gamma", "o"])
-                           && !SessionSearch.narrows(["gamma"], []))
+                       !SessionSearch.narrows(q("gamma"), q("two")) && !SessionSearch.narrows(q("gamma"), q("gamma o"))
+                           && !SessionSearch.narrows(q("gamma"), q("")))
                 let store = SessionStore()
                 store._probeSeedRecents(["gamma one", "gamma two", "delta two"].enumerated().map {
                     SessionEntry(id: "narrow-\($0.offset)", title: $0.element, timestamp: Date(), projectDirectory: cwd)

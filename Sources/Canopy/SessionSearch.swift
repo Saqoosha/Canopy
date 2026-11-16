@@ -34,6 +34,8 @@ enum SessionSearch {
     }
 
     private static func fold(_ text: String) -> String {
+        // NFC last: a literal compare does not treat NFD paths (が as か + ゛) as equal.
         text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
+            .precomposedStringWithCanonicalMapping
     }
 }
