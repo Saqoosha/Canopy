@@ -15,7 +15,7 @@
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
             <description sparkle:format="markdown"><![CDATA[### Changes
 - Session search stays fast as you keep typing: each added letter only rechecks the sessions the previous letters already matched.
-- Search matches folder names stored in decomposed Unicode (common for Japanese and other accented names on macOS), and characters such as ß and ligatures now match their spelled-out forms consistently.
+- Characters such as ß and ligatures (ﬁ) now match their spelled-out forms consistently, so a search for "s" finds "Fußball".
 - The 100-session search limit no longer hides claude.ai cloud sessions.
 - Less disk work right after launch when several session scans start at once.
 ]]></description>
