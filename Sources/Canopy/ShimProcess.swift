@@ -7163,14 +7163,31 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// resolved and cached the path on the main actor, so it must not re-run
     /// the lookup. Taking the path rather than a session id is what keeps that
     /// site from passing a placeholder id to satisfy a signature.
+    ///
+    /// The last record's `cwd` comes first. On CLI 2.1.325 `EnterWorktree`
+    /// leaves the transcript in its folder and writes no `relocated` record,
+    /// so `relocated` alone answers "did not move" for a session sitting in a
+    /// worktree. A `relocated` record written after that `cwd` wins only when
+    /// the `cwd` is not a worktree: the CLI re-appends the session's last
+    /// `relocated` at every turn end (measured on a real transcript, after the
+    /// worktree's own records), and a session in a worktree cannot be moved
+    /// (`SessionMove`), so after a worktree `cwd` it is always the stale one.
     static func effectiveVCSDirectory(
         jsonlPath: String?,
         workingDirectory: URL,
+        recordCwd: (String) -> ClaudeSessionHistory.RecordCwd? = { ClaudeSessionHistory.lastRecordCwd(atPath: $0) },
         relocated: (String, URL) -> URL? = {
             ShimProcess.relocatedWorkingDirectory(jsonlPath: $0, workingDirectory: $1)
         }
     ) -> URL {
         guard let jsonlPath else { return workingDirectory }
+        if let record = recordCwd(jsonlPath) {
+            let cwd = URL(fileURLWithPath: record.cwd)
+            if let moved = record.relocatedAfter, !GitWorktree.isManagedWorktree(cwd) {
+                return URL(fileURLWithPath: moved)
+            }
+            return cwd
+        }
         return relocated(jsonlPath, workingDirectory) ?? workingDirectory
     }
 

@@ -178,9 +178,9 @@ enum ClaudeSessionHistory {
 
     /// Find `<sessionId>.jsonl` under any project folder.
     ///
-    /// The fallback for a session that MOVED. `EnterWorktree` changes the
-    /// CLI's cwd mid-session and the CLI relocates the whole transcript to the
-    /// new directory's encoded folder — measured on 2.1.258, where the old
+    /// The fallback for a session that MOVED. On CLI 2.1.258 `EnterWorktree`
+    /// relocated the whole transcript to the new directory's encoded folder
+    /// (2.1.325 no longer does; see `lastRecordCwd`), and the old
     /// folder was left holding only `memory/` (which was all it had left to
     /// hold; a folder with several sessions keeps the ones that did not move).
     /// Every `encodedFolderCandidates` entry for the ORIGINAL directory then
@@ -952,6 +952,65 @@ enum ClaudeSessionHistory {
             carry = Data(carry[carry.index(after: lastNewline)...])
         }
         return (found, end)
+    }
+
+    /// The `cwd` the CLI stamped on the transcript's last record that has one, and the `relocatedCwd` of
+    /// a `relocated` record written after it, if any.
+    /// On CLI 2.1.325 `EnterWorktree` / `ExitWorktree` change only `cwd`. The transcript stays in its folder
+    /// and no new `relocated` record is written, so `cwd(atPath:)` keeps naming the folder it was filed under.
+    /// The CLI also re-appends the session's last `relocated` record at every turn end, so one written after
+    /// the last `cwd` is not necessarily a new move (`ShimProcess.effectiveVCSDirectory` decides).
+    /// Reads the tail and widens once when the window holds no record carrying `cwd`.
+    static func lastRecordCwd(atPath path: String) -> RecordCwd? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        for window: UInt64 in [64 << 10, 4 << 20] {
+            let start = size > window ? size - window : 0
+            guard (try? handle.seek(toOffset: start)) != nil, let data = try? handle.readToEnd() else { return nil }
+            if let found = lastRecordCwd(in: data) { return found }
+            if start == 0 { break }
+        }
+        return nil
+    }
+
+    struct RecordCwd: Equatable {
+        var cwd: String
+        var relocatedAfter: String?
+    }
+
+    static func lastRecordCwd(in data: Data) -> RecordCwd? {
+        let bytes = [UInt8](data)
+        guard let cwd = lastTopLevelString(key: "cwd", in: bytes) else { return nil }
+        let relocated = lastTopLevelString(key: "relocatedCwd", in: bytes)
+        return RecordCwd(cwd: cwd.value,
+                         relocatedAfter: relocated.flatMap { $0.offset > cwd.offset ? $0.value : nil })
+    }
+
+    /// The last top-level `"<key>":"…"` in `bytes` and its offset. A match is top-level only when the byte
+    /// before it is `{` or `,`: the same text quoted inside a tool result is escaped (`\"cwd\":\"`).
+    private static func lastTopLevelString(key: String, in bytes: [UInt8]) -> (offset: Int, value: String)? {
+        let marker = Array("\"\(key)\":\"".utf8)
+        guard bytes.count > marker.count else { return nil }
+        var i = bytes.count - marker.count
+        while i > 0 {
+            defer { i -= 1 }
+            guard bytes[i] == marker[0], bytes[i - 1] == UInt8(ascii: "{") || bytes[i - 1] == UInt8(ascii: ","),
+                  bytes[i..<(i + marker.count)].elementsEqual(marker) else { continue }
+            let valueStart = i + marker.count - 1   // the opening quote
+            var j = valueStart + 1
+            var escaped = false
+            while j < bytes.count {
+                if escaped { escaped = false } else if bytes[j] == UInt8(ascii: "\\") { escaped = true } else if bytes[j] == UInt8(ascii: "\"") { break }
+                j += 1
+            }
+            guard j < bytes.count,
+                  let value = try? JSONSerialization.jsonObject(
+                      with: Data(bytes[valueStart...j]), options: .fragmentsAllowed) as? String,
+                  !value.isEmpty else { continue }
+            return (i, value)
+        }
+        return nil
     }
 
     private static func contains(_ data: Data, _ marker: [UInt8]) -> Bool {

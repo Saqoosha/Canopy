@@ -1494,6 +1494,48 @@ enum SidebarLogicProbe {
                    jsonlPath: nil, workingDirectory: vcsFrozen,
                    relocated: { _, _ in vcsMoved }
                ) == vcsFrozen)
+        // CLI 2.1.325: EnterWorktree changes only the records' `cwd`, while a
+        // stale `relocated` from an earlier move-session keeps being re-appended.
+        let vcsWorktree = "/tmp/probe/repo/.claude/worktrees/wt"
+        let vcsPath = "/tmp/probe/found.jsonl"
+        record("vcs dir: a worktree cwd wins over a relocated record re-appended after it",
+               ShimProcess.effectiveVCSDirectory(
+                   jsonlPath: vcsPath, workingDirectory: vcsFrozen,
+                   recordCwd: { _ in .init(cwd: vcsWorktree, relocatedAfter: "/tmp/probe/repo") },
+                   relocated: { _, _ in vcsMoved }
+               ).path == vcsWorktree)
+        record("vcs dir: a relocated record after a non-worktree cwd is a new move",
+               ShimProcess.effectiveVCSDirectory(
+                   jsonlPath: vcsPath, workingDirectory: vcsFrozen,
+                   recordCwd: { _ in .init(cwd: "/tmp/probe/no-folder", relocatedAfter: vcsMoved.path) },
+                   relocated: { _, _ in nil }
+               ) == vcsMoved)
+        record("vcs dir: a record cwd with nothing after it is where the session is",
+               ShimProcess.effectiveVCSDirectory(
+                   jsonlPath: vcsPath, workingDirectory: vcsFrozen,
+                   recordCwd: { _ in .init(cwd: "/tmp/probe/repo", relocatedAfter: nil) },
+                   relocated: { _, _ in vcsMoved }
+               ).path == "/tmp/probe/repo")
+        record("vcs dir: no record cwd falls back to the relocated record",
+               ShimProcess.effectiveVCSDirectory(
+                   jsonlPath: vcsPath, workingDirectory: vcsFrozen,
+                   recordCwd: { _ in nil }, relocated: { _, _ in vcsMoved }
+               ) == vcsMoved)
+        let cwdTail = """
+        {"type":"user","cwd":"/repo","message":"x"}
+        {"type":"user","cwd":"/repo/.claude/worktrees/wt","message":{"content":"tool said {\\"cwd\\":\\"/elsewhere\\"}"}}
+        {"type":"relocated","relocatedCwd":"/repo","sessionId":"s"}
+        {"type":"ai-title","title":"t"}
+
+        """
+        record("record cwd: the last top-level cwd, skipping an escaped one in content, with the relocated after it",
+               ClaudeSessionHistory.lastRecordCwd(in: Data(cwdTail.utf8))
+                   == .init(cwd: "/repo/.claude/worktrees/wt", relocatedAfter: "/repo"))
+        record("record cwd: a relocated record before the last cwd is not reported",
+               ClaudeSessionHistory.lastRecordCwd(in: Data(#"{"type":"relocated","relocatedCwd":"/a"}\#n{"type":"user","cwd":"/b"}"#.utf8))
+                   == .init(cwd: "/b", relocatedAfter: nil))
+        record("record cwd: a tail with no cwd answers nil",
+               ClaudeSessionHistory.lastRecordCwd(in: Data(#"{"type":"ai-title","title":"t"}"#.utf8)) == nil)
 
         // The resolved-path cache. Its existence check is the whole
         // invalidation strategy and deleting it reintroduces this feature's
