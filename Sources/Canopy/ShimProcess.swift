@@ -7135,7 +7135,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return relocated(jsonlPath, workingDirectory) ?? workingDirectory
     }
 
-    /// The directory the branch label reads: the last record's `cwd`, else `effectiveVCSDirectory`.
+    /// The directory the branch label and the move refusal read: the last record's `cwd`, else `effectiveVCSDirectory`.
     /// On CLI 2.1.325 `EnterWorktree` changes only the records' `cwd` (no `relocated`, the transcript
     /// stays in its folder), and a Bash `cd` moves it into a subdirectory, which `git` reads the same.
     /// The CLI re-appends the session's last `relocated` at every turn end, after those records, so a
