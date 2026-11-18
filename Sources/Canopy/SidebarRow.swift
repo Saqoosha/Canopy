@@ -26,9 +26,11 @@ enum SidebarStatusGroup: CaseIterable {
         }
     }
 
-    /// Whether a row in this group shows `OpenSession.attentionLine`; on a
-    /// working or idle row the line is history, not a request.
-    var showsAttentionLine: Bool { self == .needsYou || self == .unseen }
+    /// Whether a row shows `OpenSession.attentionLine`: only while it asks or
+    /// is unseen. An error row (also Needs you) would show a stale line.
+    static func showsAttentionLine(_ activity: SessionActivity) -> Bool {
+        activity == .asking || activity == .unread
+    }
 
     /// `.error` sits with `.asking`: both stay stuck until the user acts.
     /// `.background` sits with `.working`: alive, and not the user's turn.

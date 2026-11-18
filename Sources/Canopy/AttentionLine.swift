@@ -10,6 +10,10 @@ enum AttentionLine {
     /// a file tool's file name, and otherwise the tool name alone. Shown as
     /// written: this is what the user is approving.
     static func forRequest(toolName: String, inputs: Any?) -> String? {
+        requestText(toolName: toolName, inputs: inputs).flatMap(firstLine)
+    }
+
+    private static func requestText(toolName: String, inputs: Any?) -> String? {
         let dict = inputs as? [String: Any] ?? [:]
         if toolName == "AskUserQuestion",
            let questions = dict["questions"] as? [[String: Any]],
@@ -36,13 +40,16 @@ enum AttentionLine {
     /// marker and every `**` removed.
     static func forTurnEnd(finalText: String?) -> String? {
         guard let finalText else { return nil }
-        let line = finalText.split(whereSeparator: \.isNewline)
+        return finalText.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
-            .first { !$0.isEmpty && !$0.hasPrefix("```") }
-        guard let line else { return nil }
-        let unmarked = line.replacingOccurrences(of: "**", with: "")
-            .replacingOccurrences(of: #"^(#{1,6}|>|[-*+]|\d+\.)\s+"#, with: "", options: .regularExpression)
-        return firstLine(unmarked)
+            .filter { !$0.hasPrefix("```") }
+            .lazy
+            .compactMap { line in
+                firstLine(line.replacingOccurrences(of: "**", with: "")
+                    .replacingOccurrences(of: #"^(#{1,6}|>|[-*+]|\d+\.)(\s+|$)"#, with: "", options: .regularExpression)
+                    .replacingOccurrences(of: #"^[-*_]{3,}$"#, with: "", options: .regularExpression))
+            }
+            .first
     }
 
     /// First non-blank line, trimmed and cut to `maxCharacters`.

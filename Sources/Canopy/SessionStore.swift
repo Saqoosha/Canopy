@@ -3261,8 +3261,12 @@ final class SessionStore {
     /// something, `Needs you` before `Done · unseen`, each in sidebar order.
     /// Independent of the grouping mode, so the shortcut means the same
     /// thing whether or not the sidebar shows the Status sections.
-    var attentionSessionIds: [UUID] {
-        let unread = unreadSessionIds
+    var attentionSessionIds: [UUID] { attentionSessionIds(keeping: nil) }
+
+    /// `keeping` is ranked as if still unread: the Cmd+J keystroke itself
+    /// clears the current session's unread mark before the jump runs.
+    func attentionSessionIds(keeping kept: UUID?) -> [UUID] {
+        let unread = kept.map { unreadSessionIds.union([$0]) } ?? unreadSessionIds
         return SidebarStatusGroup.sections(visibleRows.filter(\.isOpen)) { unread.contains($0) }
             .filter { $0.group == .needsYou || $0.group == .unseen }
             .flatMap(\.rows)
@@ -3290,7 +3294,7 @@ final class SessionStore {
             if case .session(let id) = focusedPane?.content { return id }
             return nil
         }()
-        guard let target = Self.nextAttentionTarget(attentionSessionIds, current: current, delta: delta),
+        guard let target = Self.nextAttentionTarget(attentionSessionIds(keeping: current), current: current, delta: delta),
               target != current else { return }
         openInFocusedPane(target)
     }

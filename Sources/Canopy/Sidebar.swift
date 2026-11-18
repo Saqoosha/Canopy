@@ -1122,7 +1122,7 @@ private struct SidebarRowView: View {
 
     private var attentionLine: String? {
         guard case .open(let session) = row,
-              SidebarStatusGroup.of(SessionActivity.of(session, isUnread: isUnread)).showsAttentionLine
+              SidebarStatusGroup.showsAttentionLine(SessionActivity.of(session, isUnread: isUnread))
         else { return nil }
         return session.attentionLine
     }

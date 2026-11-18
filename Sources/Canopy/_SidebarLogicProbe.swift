@@ -10106,8 +10106,33 @@ enum SidebarLogicProbe {
             let over = AttentionLine.firstLine(String(repeating: "y", count: n + 1))
             record("attention line: exactly maxCharacters is kept, one more is cut to maxCharacters",
                    exact?.count == n && exact?.hasSuffix("…") == false && over?.count == n && over?.hasSuffix("…") == true)
-            record("attention line: only Needs you and Done · unseen rows show it",
-                   SidebarStatusGroup.allCases.filter(\.showsAttentionLine) == [.needsYou, .unseen])
+            record("attention line: only asking and unread rows show it, not error rows",
+                   SessionActivity.allCases.filter(SidebarStatusGroup.showsAttentionLine) == [.asking, .unread])
+            let ruled = AttentionLine.forTurnEnd(finalText: "---\n- \nBuild completed")
+            record("attention line: a turn end moves past lines that are only Markdown marks",
+                   ruled == "Build completed", "\(String(describing: ruled))")
+            let longDesc = AttentionLine.forRequest(toolName: "Bash",
+                                                    inputs: ["description": String(repeating: "d", count: AttentionLine.maxCharacters)])
+            record("attention line: the cap covers a request's prefix too",
+                   longDesc?.count == AttentionLine.maxCharacters && longDesc?.hasPrefix("Bash: ") == true,
+                   "count \(longDesc?.count ?? -1)")
+
+            // Cmd+J: the keystroke clears the current session's unread mark first, so it is ranked as unread.
+            let jumpStore = SessionStore()
+            func liveJ(_ id: String) -> OpenSession {
+                OpenSession(origin: .local(FileManager.default.temporaryDirectory), resumeId: id, title: id,
+                            project: "p", status: .live)
+            }
+            let ja = liveJ("j-a"); ja.isAsking = true
+            let jb = liveJ("j-b"), jc = liveJ("j-c"), jd = liveJ("j-d")
+            jumpStore._probeSeedOpenSessions([ja, jb, jc, jd])
+            jumpStore.setUnreadSessionIds([jc.id])
+            record("attention jump: targets are needs-you then unseen; idle rows are out",
+                   jumpStore.attentionSessionIds == [ja.id, jc.id], "\(jumpStore.attentionSessionIds)")
+            record("attention jump: the current session keeps its unseen rank after the keystroke cleared it",
+                   jumpStore.attentionSessionIds(keeping: jb.id) == [ja.id, jb.id, jc.id]
+                       && SessionStore.nextAttentionTarget(jumpStore.attentionSessionIds(keeping: jb.id),
+                                                           current: jb.id, delta: 1) == jc.id)
 
             // The daemon's half: list_sessions / session_state rows carry the three fields.
             let wireStore = SessionStore()
