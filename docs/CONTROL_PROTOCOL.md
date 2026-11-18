@@ -278,11 +278,12 @@ Carry Claude Code's cross-session messages (`SendMessage`) between paired Macs
 - `remote_peers` (local only): `list_peers` on every Mac in
   `canopy.mirrorPeers`. Each row drops `socket` and gains `machine` and
   `address`, a `uds:` proxy socket on this Mac that `SendMessage` takes. A Mac
-  that did not answer lands in `errors` (`machineId`, `error`).
-- `peer_deliver` (sent by the other Mac's daemon): `to` (a live local session
-  socket), `line` (one NDJSON line from the CLI), `fromMachine` (must be in
-  this Mac's `canopy.mirrorPeers`, or the reply could not go back),
-  `fromMachineName`. Result `ok`.
+  that did not answer, or a row whose proxy could not open, lands in `errors`
+  (`machineId`, `error`).
+- `peer_deliver` (local and TCP; the other Mac's daemon sends it): `to` (a live
+  local session socket), `line` (one NDJSON line from the CLI), `fromMachine`
+  (must be in this Mac's `canopy.mirrorPeers`, or the reply could not go back;
+  not an authentication check), `fromMachineName`. Result `ok`.
 
 ### `pending_requests`
 

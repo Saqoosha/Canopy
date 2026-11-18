@@ -921,16 +921,28 @@ final class ControlSession {
             let directory = PeerRelay.localDirectory(await Task.detached { PeerRelay.localPeers() }.value)
             var rows: [[String: Any]] = []
             var errors: [[String: Any]] = []
-            for machineId in CanopySettings.shared.mirrorPeers.keys.sorted() {
-                switch await PeerControl.request(machineId: machineId, "list_peers", [:]) {
+            // Started together, so offline Macs cost one timeout, not one each.
+            let pending = CanopySettings.shared.mirrorPeers.keys.sorted().map { machineId in
+                Task { @MainActor in
+                    PeerAnswer(machineId: machineId,
+                               result: await PeerControl.request(machineId: machineId, "list_peers", [:]))
+                }
+            }
+            for task in pending {
+                let answer = await task.value
+                let machineId = answer.machineId
+                switch answer.result {
                 case .failure(let failure):
                     errors.append(["machineId": machineId, "error": failure.message(machineName: machineId)])
                 case .success(let result):
                     let machine = result["machine"] as? String ?? machineId
                     for peer in result["peers"] as? [[String: Any]] ?? [] {
-                        guard let socket = peer["socket"] as? String,
-                              let proxy = PeerRelay.shared.proxy(for: .init(machineId: machineId, socket: socket),
-                                                                 in: directory) else { continue }
+                        guard let socket = peer["socket"] as? String else { continue }
+                        guard let proxy = PeerRelay.shared.proxy(for: .init(machineId: machineId, socket: socket),
+                                                                 in: directory) else {
+                            errors.append(["machineId": machineId, "error": "could not open a local proxy in \(directory) for \(socket)"])
+                            continue
+                        }
                         var row = peer
                         row.removeValue(forKey: "socket")
                         row["machine"] = machine
@@ -972,4 +984,10 @@ final class ControlSession {
         logger.notice("control \(request.verb, privacy: .public) refused: \(message, privacy: .public)")
         send(ControlProtocol.errorResponse(id: request.id, message: message, code: code))
     }
+}
+
+/// One Mac's `list_peers` answer; the result dictionary holds only JSON values.
+private struct PeerAnswer: @unchecked Sendable {
+    let machineId: String
+    let result: Result<[String: Any], PeerControl.Failure>
 }

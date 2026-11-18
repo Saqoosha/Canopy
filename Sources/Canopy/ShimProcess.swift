@@ -4254,6 +4254,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         "skills/find-session/SKILL.md",
         "skills/find-session/find_sessions.py",
         "skills/move-session/SKILL.md",
+        "skills/remote-peers/SKILL.md",
         "bin/canopyctl",
     ]
 

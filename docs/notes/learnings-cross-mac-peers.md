@@ -16,5 +16,6 @@ Measured on CLI 2.1.326 (2026-11-18). The relay is `PeerRelay`; the verbs are in
 
 ## Pairing
 
-- Replies go back over `PeerControl`, so both Macs must hold each other's connection in Settings › Remote. `peer_deliver` refuses a sender it cannot reach back.
+- Replies go back over `PeerControl`, so both Macs must hold each other's connection in Settings › Remote. `peer_deliver` refuses a sender with no entry in `canopy.mirrorPeers`; that is not an identity check, since any client holding the control password can name any paired Mac.
+- A delivery failure on the far side is only logged on the sending Mac. The sending CLI already counted the send as done, so its Claude just never gets an answer.
 - `MachineIdentity.stableId()` (IOPlatformUUID) is the key in the other Mac's `canopy.mirrorPeers`.

@@ -12315,6 +12315,74 @@ enum SidebarLogicProbe {
                    "got \(String(describing: clamped))")
         }
 
+        // PeerRelay: the pure helpers that point a relayed message at its proxy.
+        do {
+            let relay = PeerRelay.self
+            let route = PeerRelay.Route(machineId: "m-1", socket: "/tmp/cc-socks/9.sock")
+            let name = relay.proxyName(route)
+            record("peerrelay: proxy name is 16 hex digits plus .sock",
+                   name.range(of: "^[0-9a-f]{16}\\.sock$", options: .regularExpression) != nil, name)
+            record("peerrelay: proxy name is deterministic for one route",
+                   relay.proxyName(PeerRelay.Route(machineId: route.machineId, socket: route.socket)) == name)
+            record("peerrelay: proxy name changes with the machine",
+                   relay.proxyName(PeerRelay.Route(machineId: "m-2", socket: route.socket)) != name)
+            record("peerrelay: proxy name changes with the socket",
+                   relay.proxyName(PeerRelay.Route(machineId: route.machineId, socket: "/tmp/cc-socks/10.sock")) != name)
+
+            let old = "uds:/tmp/cc-socks/123.sock"
+            let new = "uds:/tmp/cc-socks/abcdef0123456789.sock"
+            let tag = "<cross-session-message from=\"\(old)\" from-name=\"alpha\" from-mode=\"bypass\">\nhi\n</cross-session-message>"
+            let wire: [String: Any] = ["msgV": 1, "msg_id": "m1", "type": "user", "priority": "next", "from": old,
+                                       "message": ["role": "user", "content": tag] as [String: Any]]
+            let out = relay.rewrite(wire, from: old, to: new, machineName: "studio")
+            let content = (out["message"] as? [String: Any])?["content"] as? String ?? ""
+            record("peerrelay: rewrite points the top-level from at the proxy", out["from"] as? String == new)
+            record("peerrelay: rewrite points the tag's from at the proxy", content.contains("from=\"\(new)\""))
+            record("peerrelay: rewrite leaves no trace of the old address", !content.contains(old))
+            record("peerrelay: rewrite names the sender's Mac", content.contains("from-name=\"alpha on studio\""))
+            record("peerrelay: rewrite keeps from-mode", content.contains("from-mode=\"bypass\""))
+            record("peerrelay: rewrite keeps the body", content.contains("\nhi\n"))
+            record("peerrelay: rewrite leaves the envelope fields alone",
+                   out["msgV"] as? Int == 1 && out["msg_id"] as? String == "m1"
+                       && out["priority"] as? String == "next" && out["type"] as? String == "user")
+
+            let blocks: [[String: Any]] = [["type": "text", "text": tag], ["type": "image", "source": "x"]]
+            let blockWire: [String: Any] = ["from": old, "message": ["role": "user", "content": blocks] as [String: Any]]
+            let blockOut = (relay.rewrite(blockWire, from: old, to: new, machineName: "studio")["message"] as? [String: Any])?["content"] as? [[String: Any]]
+            record("peerrelay: rewrite rewrites a text block",
+                   (blockOut?.first?["text"] as? String)?.contains("from=\"\(new)\"") == true)
+            record("peerrelay: rewrite leaves an image block alone",
+                   blockOut?.last?["type"] as? String == "image" && blockOut?.last?["source"] as? String == "x")
+
+            let bare = relay.rewrite(["from": old, "type": "user"], from: old, to: new, machineName: "studio")
+            record("peerrelay: rewrite without a message changes only from",
+                   bare["from"] as? String == new && bare["type"] as? String == "user")
+            record("peerrelay: rewrite without a message adds no message key", bare["message"] == nil)
+
+            record("peerrelay: a text without a tag is unchanged",
+                   relay.rewriteTag("plain text from=\"\(old)\"", from: old, to: new, machineName: "studio") == "plain text from=\"\(old)\"")
+            for blank in [nil, "", "  "] as [String?] {
+                let r = relay.rewriteTag(tag, from: old, to: new, machineName: blank)
+                record("peerrelay: machine name \(String(describing: blank)) adds no suffix",
+                       !r.contains(" on ") && r.contains("from-name=\"alpha\""))
+            }
+            record("peerrelay: machine name loses quote and angle characters",
+                   relay.rewriteTag(tag, from: old, to: new, machineName: "st\"u<d>io").contains("from-name=\"alpha on studio\""))
+            let noName = "<cross-session-message from=\"\(old)\">\nhi\n</cross-session-message>"
+            let noNameOut = relay.rewriteTag(noName, from: old, to: new, machineName: "studio")
+            record("peerrelay: a tag without from-name gets from rewritten and no suffix",
+                   noNameOut.contains("from=\"\(new)\"") && !noNameOut.contains(" on "))
+            let trailing = tag + "\nsee \(old)"
+            record("peerrelay: the old address after the tag is left alone",
+                   relay.rewriteTag(trailing, from: old, to: new, machineName: "studio").hasSuffix("\nsee \(old)"))
+
+            record("peerrelay: no local peers falls back to the default directory",
+                   relay.localDirectory([]) == relay.defaultDirectory)
+            let peer = PeerRelay.LocalPeer(name: nil, socket: "/tmp/x/1.sock", cwd: nil, status: nil, sessionId: nil)
+            record("peerrelay: the directory is the first peer's socket directory",
+                   relay.localDirectory([peer]) == "/tmp/x")
+        }
+
         // Summary. Note `grep -c 'record('` does NOT equal this count: the
         // `func record(` definition matches too, and a few call sites only
         // fire on failure. Read the printed number, don't count the source.

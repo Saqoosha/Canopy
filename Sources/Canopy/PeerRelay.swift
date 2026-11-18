@@ -9,7 +9,7 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "PeerRelay")
 ///
 /// The CLI's peer messaging is machine-local. Each session listens on the Unix socket named
 /// by `messagingSocketPath` in `~/.claude/sessions/<pid>.json`; a send is one connection
-/// carrying NDJSON lines whose `from` is the sender's `uds:` socket, and the receiver answers
+/// carrying one JSON line whose `from` is the sender's `uds:` socket, and the receiver answers
 /// (replies, hold receipts) by connecting to that `from`. So a session on another Mac is
 /// represented here by a proxy socket next to the local ones. A line arriving on a proxy goes
 /// to the owning Mac's daemon as `peer_deliver`; that daemon points `from` at a proxy of its
@@ -41,14 +41,21 @@ final class PeerRelay {
         }
     }
 
-    /// The CLI's own default. A proxy must sit in the same directory as the socket of the
-    /// session that will answer it: the CLI replies to a `uds:` address there without asking.
+    /// The CLI's own default.
     nonisolated static let defaultDirectory = "/tmp/cc-socks"
-    /// A send carries one message; SendFile can carry files inline, so the cap is generous.
-    nonisolated static let maxLineBytes = 32 << 20
+    /// A line travels inside a JSON-escaped `peer_deliver` frame capped at `NDJSONLineBuffer.maxLineBytes`.
+    nonisolated static let maxLineBytes = NDJSONLineBuffer.maxLineBytes / 4
+    /// A saved route not used for this long is not reopened at start.
+    nonisolated static let routeLifetime: TimeInterval = 7 * 24 * 3600
+
+    private struct Saved: Codable {
+        let route: Route
+        let used: Date
+    }
 
     /// Proxy path → the remote session it stands for.
     private var routes: [String: Route] = [:]
+    private var used: [String: Date] = [:]
     private var restored = false
 
     private static var routesFile: URL {
@@ -65,7 +72,7 @@ final class PeerRelay {
         guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
         var peers: [LocalPeer] = []
         for file in files where file.hasSuffix(".json") {
-            guard let pid = Int32(file.dropLast(5)) else { continue }
+            guard let pid = Int32(file.dropLast(5)), pid > 0 else { continue }
             let alive = kill(pid, 0) == 0 || errno == EPERM
             guard alive,
                   let data = try? Data(contentsOf: dir.appendingPathComponent(file)),
@@ -89,22 +96,39 @@ final class PeerRelay {
     func restore() {
         guard !restored else { return }
         restored = true
-        guard let data = try? Data(contentsOf: Self.routesFile),
-              let saved = try? JSONDecoder().decode([String: Route].self, from: data) else { return }
-        for (path, route) in saved {
-            _ = proxy(for: route, in: (path as NSString).deletingLastPathComponent)
+        let data: Data
+        do {
+            data = try Data(contentsOf: Self.routesFile)
+        } catch {
+            if (error as NSError).code != NSFileReadNoSuchFileError {
+                logger.error("could not read proxy routes: \(error.localizedDescription, privacy: .public)")
+            }
+            return
+        }
+        let saved: [String: Saved]
+        do {
+            saved = try JSONDecoder().decode([String: Saved].self, from: data)
+        } catch {
+            logger.error("could not decode proxy routes: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        let cutoff = Date().addingTimeInterval(-Self.routeLifetime)
+        for (path, entry) in saved where entry.used > cutoff {
+            used[path] = entry.used
+            _ = proxy(for: entry.route, in: (path as NSString).deletingLastPathComponent)
         }
     }
 
     /// The proxy socket standing for `route`, opened if it is not already.
     func proxy(for route: Route, in directory: String) -> String? {
         let path = (directory as NSString).appendingPathComponent(Self.proxyName(route))
-        if routes[path] == route { return path }
-        guard let fd = Self.openListener(at: path) else {
-            logger.error("could not open proxy \(path, privacy: .public)")
-            return nil
+        if routes[path] == route, Self.isSocket(path) {
+            touch(path)
+            return path
         }
+        guard let fd = Self.openListener(at: path) else { return nil }
         routes[path] = route
+        used[path] = Date()
         save()
         Self.startAccepting(fd: fd, proxy: path)
         logger.notice("proxy \(path, privacy: .public) → \(route.machineId, privacy: .public) \(route.socket, privacy: .public)")
@@ -112,23 +136,46 @@ final class PeerRelay {
     }
 
     /// 16 hex digits: the CLI accepts `[0-9a-f]{1,16}.sock` as a session socket name, and a
-    /// stable name keeps an address valid across daemon restarts.
+    /// stable name keeps an address valid across daemon restarts. The bundle id keeps a Debug
+    /// and a Release daemon from taking over each other's proxies.
     nonisolated static func proxyName(_ route: Route) -> String {
-        let digest = SHA256.hash(data: Data("\(route.machineId)\n\(route.socket)".utf8))
+        let bundle = Bundle.main.bundleIdentifier ?? ""
+        let digest = SHA256.hash(data: Data("\(bundle)\n\(route.machineId)\n\(route.socket)".utf8))
         return digest.prefix(8).map { String(format: "%02x", $0) }.joined() + ".sock"
     }
 
+    private func touch(_ path: String) {
+        guard Date().timeIntervalSince(used[path] ?? .distantPast) > 3600 else { return }
+        used[path] = Date()
+        save()
+    }
+
+    /// The accept loop ended, so the next `proxy(for:)` must open the socket again.
+    private func closed(_ path: String) {
+        routes.removeValue(forKey: path)
+    }
+
     private func save() {
-        guard let data = try? JSONEncoder().encode(routes) else { return }
-        try? FileManager.default.createDirectory(at: Self.routesFile.deletingLastPathComponent(),
-                                                 withIntermediateDirectories: true)
-        try? data.write(to: Self.routesFile, options: .atomic)
+        var saved: [String: Saved] = [:]
+        for (path, route) in routes { saved[path] = Saved(route: route, used: used[path] ?? Date()) }
+        do {
+            let data = try JSONEncoder().encode(saved)
+            try FileManager.default.createDirectory(at: Self.routesFile.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            try data.write(to: Self.routesFile, options: .atomic)
+        } catch {
+            logger.error("could not save proxy routes: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     // MARK: - Sending side
 
     private func forward(_ line: String, from proxy: String) {
-        guard let route = routes[proxy] else { return }
+        guard let route = routes[proxy] else {
+            logger.error("no route for \(proxy, privacy: .public); dropping a line")
+            return
+        }
+        touch(proxy)
         Task {
             let params: [String: Any] = ["to": route.socket, "line": line,
                                          "fromMachine": MachineIdentity.stableId() ?? "",
@@ -146,8 +193,8 @@ final class PeerRelay {
 
     // MARK: - Receiving side
 
-    /// Writes a line that arrived from another Mac to a local session's socket. Returns why
-    /// it could not, or nil.
+    /// Writes a line that arrived from another Mac to a local session's socket. The sender's
+    /// reply proxy goes next to that socket, since the CLI answers a `uds:` address only there.
     func deliver(to socket: String, line: String, fromMachine: String, fromMachineName: String?) async -> String? {
         let local = await Task.detached { Self.localPeers() }.value
         guard local.contains(where: { $0.socket == socket }) else { return "no live session listens on \(socket)" }
@@ -168,8 +215,8 @@ final class PeerRelay {
         guard var data = try? JSONSerialization.data(withJSONObject: message) else { return "unwritable message" }
         data.append(0x0A)
         let payload = data
-        let written = await Task.detached { Self.write(payload, to: socket) }.value
-        return written ? nil : "could not write to \(socket)"
+        let failure = await Task.detached { Self.write(payload, to: socket) }.value
+        return failure.map { "could not write to \(socket): \($0)" }
     }
 
     /// Points the envelope at the proxy: the top-level `from`, and the opening
@@ -218,17 +265,28 @@ final class PeerRelay {
         return addr
     }
 
+    nonisolated private static func isSocket(_ path: String) -> Bool {
+        var info = stat()
+        return lstat(path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFSOCK
+    }
+
     nonisolated private static func openListener(at path: String) -> Int32? {
-        guard var addr = address(path) else { return nil }
+        func failed(_ step: String) -> Int32? {
+            logger.error("could not open proxy \(path, privacy: .public): \(step, privacy: .public) \(String(cString: strerror(errno)), privacy: .public)")
+            return nil
+        }
+        guard var addr = address(path) else { return failed("path too long") }
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return nil }
+        guard fd >= 0 else { return failed("socket") }
         unlink(path)
         let bound = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
-        guard bound == 0, chmod(path, 0o600) == 0, listen(fd, 16) == 0 else {
+        let step = bound != 0 ? "bind" : chmod(path, 0o600) != 0 ? "chmod" : listen(fd, 16) != 0 ? "listen" : nil
+        if let step {
+            let result = failed(step)
             close(fd)
-            return nil
+            return result
         }
         return fd
     }
@@ -238,9 +296,10 @@ final class PeerRelay {
             while true {
                 let client = accept(fd, nil, nil)
                 if client < 0 {
-                    if errno == EINTR { continue }
+                    if errno == EINTR || errno == ECONNABORTED { continue }
                     logger.error("accept on \(proxy, privacy: .public) failed: errno \(errno)")
                     close(fd)
+                    Task { @MainActor in PeerRelay.shared.closed(proxy) }
                     return
                 }
                 Thread.detachNewThread { readLines(client, proxy: proxy) }
@@ -261,7 +320,12 @@ final class PeerRelay {
         }
         while true {
             let count = read(fd, &chunk, chunk.count)
-            if count <= 0 { break }
+            if count < 0 {
+                if errno == EINTR { continue }
+                logger.error("read on \(proxy, privacy: .public) failed: errno \(errno); dropping \(buffer.count) bytes")
+                return
+            }
+            if count == 0 { break }
             buffer.append(contentsOf: chunk[0..<count])
             while let newline = buffer.firstIndex(of: 0x0A) {
                 emit(buffer[buffer.startIndex..<newline])
@@ -275,26 +339,31 @@ final class PeerRelay {
         emit(buffer)
     }
 
-    nonisolated private static func write(_ data: Data, to path: String) -> Bool {
-        guard var addr = address(path) else { return false }
+    /// Returns why the write failed, or nil.
+    nonisolated private static func write(_ data: Data, to path: String) -> String? {
+        func reason() -> String { String(cString: strerror(errno)) }
+        guard var addr = address(path) else { return "path too long" }
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return false }
+        guard fd >= 0 else { return reason() }
         defer { close(fd) }
         var on: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
+        guard setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size)) == 0 else { return reason() }
+        var timeout = timeval(tv_sec: 10, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         let connected = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
         }
-        guard connected == 0 else { return false }
-        return data.withUnsafeBytes { raw -> Bool in
-            guard let base = raw.baseAddress else { return true }
+        guard connected == 0 else { return reason() }
+        return data.withUnsafeBytes { raw -> String? in
+            guard let base = raw.baseAddress else { return nil }
             var offset = 0
             while offset < raw.count {
                 let sent = Darwin.write(fd, base + offset, raw.count - offset)
-                if sent <= 0 { return false }
+                if sent < 0, errno == EINTR { continue }
+                if sent <= 0 { return reason() }
                 offset += sent
             }
-            return true
+            return nil
         }
     }
 }
