@@ -229,8 +229,6 @@ final class DaemonDelegate {
 
         // From launch, so `listen` sees sessions opened before any client connects.
         ControlEventLog.shared.track(store)
-        // Proxies handed out before a restart keep answering (PeerRelay).
-        PeerRelay.shared.restore()
         let server = MirrorServer(store: store, token: MirrorAccess.token(createIfMissing: false) ?? "")
         server.acceptsControl = true
         server.refreshesToken = true
@@ -255,6 +253,8 @@ final class DaemonDelegate {
         }
         // After the socket is ours: a daemon that exits because another serves it must not eat the file.
         ControlEventLog.shared.restoreSaved()
+        // Proxies handed out before a restart keep answering (PeerRelay); reopening one unlinks the live socket.
+        PeerRelay.shared.restore()
         reloadConfig()
         restoreHeldSessions()
         // The GUI changes these settings in another process; follow them.
