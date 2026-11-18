@@ -124,6 +124,12 @@ def main(argv):
         if name not in ("stop", "pending"):
             sub_p.add_argument("--reply-id", dest="reply_id")
 
+    sub.add_parser(
+        "peers",
+        help="remote_peers: Claude sessions on paired Macs, each with a uds: address "
+        "SendMessage takes",
+    )
+
     history_p = sub.add_parser(
         "history", help="history: the last turns, pane and phone ones included"
     )
@@ -370,6 +376,8 @@ def build(args):
         return "show_session", params
     if args.cmd == "move":
         return "move_session", {"sessionId": args.session_id, "path": args.path}
+    if args.cmd == "peers":
+        return "remote_peers", {}
     params = session_params(args)
     if args.cmd == "history":
         if args.limit is not None:

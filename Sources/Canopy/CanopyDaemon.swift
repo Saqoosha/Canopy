@@ -253,6 +253,8 @@ final class DaemonDelegate {
         }
         // After the socket is ours: a daemon that exits because another serves it must not eat the file.
         ControlEventLog.shared.restoreSaved()
+        // Proxies handed out before a restart keep answering (PeerRelay); reopening one unlinks the live socket.
+        PeerRelay.shared.restore()
         reloadConfig()
         restoreHeldSessions()
         // The GUI changes these settings in another process; follow them.

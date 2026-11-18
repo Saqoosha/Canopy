@@ -92,6 +92,9 @@ final class ControlSession {
         case "listen": listen(request)
         case "history": history(request)
         case "slack_bind", "slack_unbind", "slack_bindings": slackRequest(request)
+        case "list_peers": listPeers(request)
+        case "remote_peers": remotePeers(request)
+        case "peer_deliver": peerDeliver(request)
         default: fail(request, "unknown verb")
         }
     }
@@ -900,6 +903,80 @@ final class ControlSession {
         send(["type": "session_state", "sessions": state.rows.map(\.wire), "reaped": state.reaped.map(\.wire)])
     }
 
+    // MARK: - Cross-Mac peer messages (PeerRelay)
+
+    /// This Mac's CLI sessions that accept SendMessage, for another Mac's `remote_peers`.
+    private func listPeers(_ request: ControlProtocol.Request) {
+        Task { @MainActor [weak self] in
+            let peers = await Task.detached { PeerRelay.localPeers() }.value
+            self?.reply(request, ["machine": PeerRelay.machineName, "peers": peers.map(\.wire)])
+        }
+    }
+
+    /// Every paired Mac's sessions, each with a local proxy address SendMessage can take.
+    /// Only a local client may ask: it opens sockets on this Mac.
+    private func remotePeers(_ request: ControlProtocol.Request) {
+        guard isLocal else { return fail(request, "local clients only") }
+        Task { @MainActor [weak self] in
+            let directory = PeerRelay.localDirectory(await Task.detached { PeerRelay.localPeers() }.value)
+            var rows: [[String: Any]] = []
+            var errors: [[String: Any]] = []
+            // Started together, so offline Macs cost one timeout, not one each.
+            let pending = CanopySettings.shared.mirrorPeers.keys.sorted().map { machineId in
+                Task { @MainActor in
+                    PeerAnswer(machineId: machineId,
+                               result: await PeerControl.request(machineId: machineId, "list_peers", [:]))
+                }
+            }
+            for task in pending {
+                let answer = await task.value
+                let machineId = answer.machineId
+                switch answer.result {
+                case .failure(let failure):
+                    errors.append(["machineId": machineId, "error": failure.message(machineName: machineId)])
+                case .success(let result):
+                    let machine = result["machine"] as? String ?? machineId
+                    var unopened = 0
+                    for peer in result["peers"] as? [[String: Any]] ?? [] {
+                        guard let socket = peer["socket"] as? String else { continue }
+                        guard let proxy = PeerRelay.shared.proxy(for: .init(machineId: machineId, socket: socket),
+                                                                 in: directory) else {
+                            unopened += 1
+                            continue
+                        }
+                        var row = peer
+                        row.removeValue(forKey: "socket")
+                        row["machine"] = machine
+                        row["address"] = "uds:\(proxy)"
+                        rows.append(row)
+                    }
+                    if unopened > 0 {
+                        errors.append(["machineId": machineId,
+                                       "error": "could not open \(unopened) local proxy socket(s) in \(directory)"])
+                    }
+                }
+            }
+            self?.reply(request, ["peers": rows, "errors": errors])
+        }
+    }
+
+    /// A line another Mac's proxy received, for one of this Mac's sessions.
+    private func peerDeliver(_ request: ControlProtocol.Request) {
+        guard let to = request.params["to"] as? String, let line = request.params["line"] as? String,
+              let fromMachine = request.params["fromMachine"] as? String, !fromMachine.isEmpty else {
+            return fail(request, "peer_deliver needs to, line and fromMachine")
+        }
+        let fromMachineName = request.params["fromMachineName"] as? String
+        Task { @MainActor [weak self] in
+            if let refusal = await PeerRelay.shared.deliver(to: to, line: line, fromMachine: fromMachine,
+                                                            fromMachineName: fromMachineName) {
+                self?.fail(request, refusal)
+            } else {
+                self?.reply(request, ["ok": true])
+            }
+        }
+    }
+
     // MARK: - Replies
 
     private func reply(_ request: ControlProtocol.Request, _ result: [String: Any]) {
@@ -912,4 +989,10 @@ final class ControlSession {
         logger.notice("control \(request.verb, privacy: .public) refused: \(message, privacy: .public)")
         send(ControlProtocol.errorResponse(id: request.id, message: message, code: code))
     }
+}
+
+/// One Mac's `list_peers` answer; the result dictionary holds only JSON values.
+private struct PeerAnswer: @unchecked Sendable {
+    let machineId: String
+    let result: Result<[String: Any], PeerControl.Failure>
 }
