@@ -267,6 +267,23 @@ A refusal is an `error` response with no `errorCode`.
 - `slack_bindings`: result `items`, each with `channel`, `threadTs`,
   `sessionKey`, `sessionLabel`, `expiresAt`.
 
+### `list_peers`, `remote_peers`, `peer_deliver`
+
+Carry Claude Code's cross-session messages (`SendMessage`) between paired Macs
+(`PeerRelay`; wire format in `docs/notes/learnings-cross-mac-peers.md`).
+
+- `list_peers` (local and TCP): this Mac's live CLI sessions that accept peer
+  messages. Result: `machine` (display name), `peers`, each with `socket` and,
+  when the record has them, `name`, `cwd`, `status`, `sessionId`.
+- `remote_peers` (local only): `list_peers` on every Mac in
+  `canopy.mirrorPeers`. Each row drops `socket` and gains `machine` and
+  `address`, a `uds:` proxy socket on this Mac that `SendMessage` takes. A Mac
+  that did not answer lands in `errors` (`machineId`, `error`).
+- `peer_deliver` (sent by the other Mac's daemon): `to` (a live local session
+  socket), `line` (one NDJSON line from the CLI), `fromMachine` (must be in
+  this Mac's `canopy.mirrorPeers`, or the reply could not go back),
+  `fromMachineName`. Result `ok`.
+
 ### `pending_requests`
 
 Read-only. Lists what a session is waiting on a human for, so an agent can
