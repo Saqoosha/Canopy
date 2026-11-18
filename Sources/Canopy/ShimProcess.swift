@@ -6587,6 +6587,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 pendingAskUserQuestionRequestIds.insert(requestId)
             }
             if isNewPermissionRequest {
+                boundSession?.attentionLine = AttentionLine.forRequest(toolName: toolName,
+                                                                       inputs: request["inputs"])
                 // Capped like `pending_requests`: the event outlives the request it describes.
                 let rendered = Self.renderedToolInput(request["inputs"])
                 ControlEventLog.shared.record(toolName == "AskUserQuestion" ? .asking : .permission,
@@ -6763,6 +6765,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let wasWaiting = boundSession?.isWaiting == true
         let waiting = !isWorking && !pendingBackgroundTaskIds.isEmpty
         boundSession?.isWaiting = waiting
+        if boundSession?.backgroundTaskCount != pendingBackgroundTaskIds.count {
+            boundSession?.backgroundTaskCount = pendingBackgroundTaskIds.count
+        }
         syncBackgroundIdleBackstop(waiting: waiting)
         // A background task can end with no `result` after it.
         if wasWaiting, !waiting, pendingMove != nil { moveWhenQuiet() }
@@ -8178,6 +8183,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // turn must finish then too.
             let finalText = ioMsg["result"] as? String
             latestReplyText = finalText ?? ""
+            boundSession?.attentionLine = AttentionLine.forTurnEnd(finalText: finalText)
             let finishedControlReply = controlTurnReplyId
             if let replyId = controlTurnReplyId {
                 controlFinishedReplyId = replyId

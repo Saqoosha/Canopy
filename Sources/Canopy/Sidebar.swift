@@ -67,13 +67,26 @@ struct Sidebar: View {
                 let closedRows = rows.filter { !$0.isOpen }
                 let closedSections = SidebarGrouping.sections(from: closedRows, mode: store.groupingMode)
 
-                if !openRows.isEmpty {
-                    Section("Open") {
-                        ForEach(openRows, id: \.id) { row in
-                            rowView(row)
+                ForEach(store.openSections(openRows), id: \.group) { section in
+                    if let group = section.group {
+                        // No .onMove: `moveOpenRows` takes offsets into the
+                        // whole Open block, and a drag here would also fight
+                        // the grouping that put the row where it is.
+                        Section {
+                            ForEach(section.rows, id: \.id) { row in
+                                rowView(row)
+                            }
+                        } header: {
+                            Text("\(group.title) \(section.rows.count)")
                         }
-                        .onMove { from, to in
-                            store.moveOpenRows(fromOffsets: from, toOffset: to)
+                    } else {
+                        Section("Open") {
+                            ForEach(section.rows, id: \.id) { row in
+                                rowView(row)
+                            }
+                            .onMove { from, to in
+                                store.moveOpenRows(fromOffsets: from, toOffset: to)
+                            }
                         }
                     }
                 }
@@ -236,6 +249,7 @@ struct Sidebar: View {
             guard ProcessInfo.processInfo.environment["CANOPY_RUN_LOGIC_PROBE"] != "1" else { return }
             #endif
             store.isSidebarVisible = true
+            store.startActivityClock()
             await store.refreshRecents()
             await store.refreshCloud()
             store.startCloudPolling()
@@ -434,6 +448,7 @@ struct Sidebar: View {
             isActive: isActive(row),
             isTeleporting: isTeleporting(row),
             isUnread: isUnread(row),
+            activitySince: activitySince(row),
             onClose: { handleClose(row) }
         )
         // Dimmed, not hidden: the session is still real and its log is still
@@ -693,6 +708,11 @@ struct Sidebar: View {
         return s.id == id
     }
 
+    private func activitySince(_ row: SidebarRow) -> Date? {
+        if case .open(let s) = row { return store.activityStamps[s.id]?.since }
+        return nil
+    }
+
     private func isUnread(_ row: SidebarRow) -> Bool {
         if case .open(let s) = row { return store.unreadSessionIds.contains(s.id) }
         return false
@@ -937,6 +957,7 @@ private struct SidebarRowView: View {
     let isActive: Bool
     let isTeleporting: Bool
     let isUnread: Bool
+    let activitySince: Date?
     let onClose: () -> Void
 
     var body: some View {
@@ -949,6 +970,14 @@ private struct SidebarRowView: View {
                     .foregroundStyle(titleColor)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                if let attentionLine {
+                    Text(attentionLine)
+                        .font(.system(size: 11))
+                        .foregroundStyle(subtitleColor)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(attentionLine)
+                }
                 // Directly under the title, above the project: a peer name is
                 // read while deciding which session to message, so every open
                 // row is a candidate and the names want to form a column the
@@ -981,6 +1010,9 @@ private struct SidebarRowView: View {
                 }
             }
             Spacer(minLength: 4)
+            if !shouldShowClose {
+                trailingStatus
+            }
             if shouldShowClose {
                 Button {
                     onClose()
@@ -1088,9 +1120,43 @@ private struct SidebarRowView: View {
         return PeerNameStore.shared.name(forResumeId: session.resumeId)
     }
 
+    /// Only for rows that owe the user something; on a working or idle row
+    /// the last line is history, not a request.
+    private var attentionLine: String? {
+        guard case .open(let session) = row,
+              let line = session.attentionLine else { return nil }
+        switch SidebarStatusGroup.of(SessionActivity.of(session, isUnread: isUnread)) {
+        case .needsYou, .unseen: return line
+        case .working, .idle: return nil
+        }
+    }
+
     private var subtitleColor: Color { .secondary }
 
     private var closeColor: Color { .secondary }
+
+    /// `bg: N`, then the time in the current status group. Hidden on hover,
+    /// where the close button takes the slot.
+    @ViewBuilder
+    private var trailingStatus: some View {
+        let bg: Int = { if case .open(let s) = row { return s.backgroundTaskCount } else { return 0 } }()
+        if bg > 0 {
+            Text("bg: \(bg)")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.secondary.opacity(0.4)))
+        }
+        if let activitySince {
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                Text(ActivityClock.elapsed(since: activitySince, now: context.date))
+                    .font(.system(size: 10).monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            .fixedSize()
+        }
+    }
 
     private var shouldShowClose: Bool {
         guard row.isOpen else { return false }
@@ -1189,7 +1255,7 @@ struct SidebarGrouping {
     static func sections(from rows: [SidebarRow], mode: GroupingMode) -> [SidebarGrouping] {
         guard !rows.isEmpty else { return [] }
         switch mode {
-        case .date:
+        case .date, .status:
             let groups = DateGroup.grouped(rows)
             return DateGroup.allCases.compactMap { group in
                 groups[group].map { SidebarGrouping(title: group.rawValue, rows: $0) }

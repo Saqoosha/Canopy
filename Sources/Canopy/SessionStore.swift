@@ -109,6 +109,44 @@ final class SessionStore {
         unreadSessionIds = ids
     }
 
+    /// See `ActivityClock`. Read by the sidebar rows; written only by
+    /// `trackActivityClock`.
+    private(set) var activityStamps: [OpenSession.ID: ActivityClock.Stamp] = [:]
+    @ObservationIgnored private var activityClockStarted = false
+
+    /// GUI only: the sidebar starts it when it appears. Re-arms itself on every
+    /// change to a session's activity flags, the open list, or the unread set.
+    func startActivityClock() {
+        guard !activityClockStarted else { return }
+        activityClockStarted = true
+        trackActivityClock()
+    }
+
+    private func trackActivityClock() {
+        let current = withObservationTracking {
+            let unread = unreadSessionIds
+            return Dictionary(openSessions.map {
+                ($0.id, SidebarStatusGroup.of(SessionActivity.of($0, isUnread: unread.contains($0.id))))
+            }, uniquingKeysWith: { first, _ in first })
+        } onChange: { [weak self] in
+            // Fires before the mutation lands; re-read on the next turn.
+            Task { @MainActor [weak self] in self?.trackActivityClock() }
+        }
+        let next = ActivityClock.advance(activityStamps, current: current, now: Date())
+        if next != activityStamps { activityStamps = next }
+    }
+
+    /// The Open block as the sidebar draws it: one unnamed section in pane
+    /// order, or the `SidebarStatusGroup` sections in `.status` mode.
+    /// Cmd+Ctrl+1–9 reads the same order, so "the N-th open row" is the
+    /// N-th one on screen.
+    func openSections(_ openRows: [SidebarRow]) -> [(group: SidebarStatusGroup?, rows: [SidebarRow])] {
+        guard groupingMode == .status else { return openRows.isEmpty ? [] : [(nil, openRows)] }
+        let unread = unreadSessionIds
+        return SidebarStatusGroup.sections(openRows) { unread.contains($0) }
+            .map { (group: Optional($0.group), rows: $0.rows) }
+    }
+
     static let paneAbsoluteCap: Int = 6
     /// Includes the 8pt drag target from PaneDivider's ZStack; the 1pt visible line is centered inside.
     static let paneDividerWidth: CGFloat = 8
@@ -1778,6 +1816,8 @@ final class SessionStore {
             session.isThinking = activity == .working
             session.isAsking = activity == .asking
             session.isWaiting = activity == .background
+            if row.attentionLine != session.attentionLine { session.attentionLine = row.attentionLine }
+            if row.backgroundTasks != session.backgroundTaskCount { session.backgroundTaskCount = row.backgroundTasks }
             if !row.model.isEmpty { session.statusBar.model = row.model }
             if let mode = PermissionMode(rawValue: row.permissionMode), mode != session.permissionMode {
                 session.permissionMode = mode
@@ -3205,6 +3245,44 @@ final class SessionStore {
             next = ((start + delta) % n + n) % n
         }
         openInFocusedPane(ctx.available[next])
+    }
+
+    /// Cmd+J's targets: the visible open sessions that owe the user
+    /// something, `Needs you` before `Done · unseen`, each in sidebar order.
+    /// Independent of the grouping mode, so the shortcut means the same
+    /// thing whether or not the sidebar shows the Status sections.
+    var attentionSessionIds: [UUID] {
+        let unread = unreadSessionIds
+        return SidebarStatusGroup.sections(visibleRows.filter(\.isOpen)) { unread.contains($0) }
+            .filter { $0.group == .needsYou || $0.group == .unseen }
+            .flatMap(\.rows)
+            .compactMap { row in
+                if case .open(let s) = row { return s.id } else { return nil }
+            }
+    }
+
+    /// The target after (or before, for a negative `delta`) `current`,
+    /// wrapping. When `current` is not a target, forward starts at the first
+    /// and backward at the last. Nil only when there are no targets.
+    static func nextAttentionTarget(_ targets: [UUID], current: UUID?, delta: Int) -> UUID? {
+        guard !targets.isEmpty else { return nil }
+        guard let current, let i = targets.firstIndex(of: current) else {
+            return delta > 0 ? targets.first : targets.last
+        }
+        let n = targets.count
+        return targets[((i + delta) % n + n) % n]
+    }
+
+    /// Cmd+J / Cmd+Shift+J. Opens through `openInFocusedPane`, so a target
+    /// already showing in another pane moves the focus there instead.
+    func jumpToAttentionSession(delta: Int) {
+        let current: UUID? = {
+            if case .session(let id) = focusedPane?.content { return id }
+            return nil
+        }()
+        guard let target = Self.nextAttentionTarget(attentionSessionIds, current: current, delta: delta),
+              target != current else { return }
+        openInFocusedPane(target)
     }
 
     /// Replace focused pane's content with the launcher. Used by Cmd+Shift+N, and

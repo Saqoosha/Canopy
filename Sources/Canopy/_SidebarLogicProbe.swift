@@ -10004,6 +10004,110 @@ enum SidebarLogicProbe {
                    "unique=\(colors.count) cases=\(SessionActivity.allCases.count)")
         }
 
+        // --- Sidebar Status grouping of the Open block
+        do {
+            func live(_ id: String) -> OpenSession {
+                OpenSession(origin: .local(cwd), resumeId: id, title: id, project: "P", status: .live)
+            }
+            let idleA = live("st-idle-a")
+            let asking = live("st-ask"); asking.isAsking = true
+            let unread = live("st-unread")
+            let waiting = live("st-wait"); waiting.isWaiting = true
+            let crashed = OpenSession(origin: .local(cwd), resumeId: "st-crash", title: "c",
+                                      project: "P", status: .crashed(exitCode: 1))
+            let idleB = live("st-idle-b")
+            let launcher = SidebarRow.launcher(UUID())
+            let input: [SidebarRow] = [.open(idleA), .open(asking), .open(unread), .open(waiting),
+                                       .open(crashed), .open(idleB), launcher]
+            let sections = SidebarStatusGroup.sections(input) { $0 == unread.id }
+            let got = sections.map { ($0.group, $0.rows.map(\.id)) }
+            let want: [(SidebarStatusGroup, [String])] = [
+                (.needsYou, [SidebarRow.open(asking).id, SidebarRow.open(crashed).id]),
+                (.unseen, [SidebarRow.open(unread).id]),
+                (.working, [SidebarRow.open(waiting).id]),
+                (.idle, [SidebarRow.open(idleA).id, SidebarRow.open(idleB).id, launcher.id]),
+            ]
+            record("status grouping: needs-you first, pane order kept inside each group",
+                   got.count == want.count && zip(got, want).allSatisfy { $0.0 == $1.0 && $0.1 == $1.1 },
+                   "got \(got)")
+            record("status grouping: empty groups are dropped",
+                   SidebarStatusGroup.sections([.open(idleA)]) { _ in false }.map(\.group) == [.idle])
+
+            let a = UUID(), b = UUID(), c = UUID(), other = UUID()
+            let t = [a, b, c]
+            let next = { SessionStore.nextAttentionTarget(t, current: $0, delta: $1) }
+            record("attention jump: forward and back step from the current target",
+                   next(a, 1) == b && next(b, -1) == a, "\(String(describing: next(a, 1)))")
+            record("attention jump: wraps at both ends",
+                   next(c, 1) == a && next(a, -1) == c)
+            record("attention jump: from a non-target, forward starts first and back starts last",
+                   next(other, 1) == a && next(nil, -1) == c)
+            record("attention jump: no targets → nil",
+                   SessionStore.nextAttentionTarget([], current: a, delta: 1) == nil)
+        }
+
+        // --- AttentionLine: one plain line per request or turn end
+        do {
+            let ask = AttentionLine.forRequest(toolName: "AskUserQuestion", inputs: [
+                "questions": [["question": "Which sunset date?", "header": "Date", "options": []]],
+            ])
+            record("attention line: AskUserQuestion shows its first question", ask == "Which sunset date?", "\(String(describing: ask))")
+            let bashDesc = AttentionLine.forRequest(toolName: "Bash",
+                                                    inputs: ["command": "rm -rf build", "description": "Clean build dir"])
+            let bashCmd = AttentionLine.forRequest(toolName: "Bash", inputs: ["command": "git push\n--force"])
+            record("attention line: Bash prefers description, else the command's first line",
+                   bashDesc == "Bash: Clean build dir" && bashCmd == "Bash: git push",
+                   "\(String(describing: bashDesc)) / \(String(describing: bashCmd))")
+            let edit = AttentionLine.forRequest(toolName: "Edit", inputs: ["file_path": "/a/b/Sidebar.swift"])
+            record("attention line: file tools show the file name", edit == "Edit: Sidebar.swift", "\(String(describing: edit))")
+            record("attention line: other tools show the tool name",
+                   AttentionLine.forRequest(toolName: "WebFetch", inputs: ["url": "x"]) == "WebFetch")
+            let turn = AttentionLine.forTurnEnd(finalText: "\n\n## **Done.** All tests pass\n\nmore")
+            record("attention line: turn end takes the first non-blank line, Markdown marks removed",
+                   turn == "Done. All tests pass", "\(String(describing: turn))")
+            let long = AttentionLine.forTurnEnd(finalText: String(repeating: "x", count: 500)) ?? ""
+            record("attention line: cut to maxCharacters with an ellipsis",
+                   long.count == AttentionLine.maxCharacters && long.hasSuffix("…"), "count \(long.count)")
+            record("attention line: blank text → nil", AttentionLine.forTurnEnd(finalText: " \n ") == nil)
+
+            let row = ControlProtocol.SessionRow(key: "K", resumeId: "r", title: "t", project: "p", cwd: "/p",
+                                                 state: "asking", running: true, clients: 1, lastActiveAt: 0,
+                                                 model: "", messageCount: 0, permissionMode: "", accountId: nil,
+                                                 attentionLine: "Bash: git push")
+            let bare = ControlProtocol.SessionRow(key: "K", resumeId: "r", title: "t", project: "p", cwd: "/p",
+                                                  state: "idle", running: true, clients: 1, lastActiveAt: 0,
+                                                  model: "", messageCount: 0, permissionMode: "", accountId: nil)
+            record("attention line: survives the session_state wire, absent while nil",
+                   ControlProtocol.SessionRow(wire: row.wire)?.attentionLine == "Bash: git push"
+                       && bare.wire["attentionLine"] == nil)
+            let bgRow = ControlProtocol.SessionRow(key: "K", resumeId: "r", title: "t", project: "p", cwd: "/p",
+                                                   state: "background", running: true, clients: 1, lastActiveAt: 0,
+                                                   model: "", messageCount: 0, permissionMode: "", accountId: nil,
+                                                   backgroundTasks: 2)
+            record("background tasks: survive the session_state wire, absent while 0",
+                   ControlProtocol.SessionRow(wire: bgRow.wire)?.backgroundTasks == 2
+                       && bare.wire["backgroundTasks"] == nil)
+        }
+
+        // --- ActivityClock: restamp on a group change only
+        do {
+            let a = UUID(), b = UUID(), gone = UUID()
+            let t0 = Date(timeIntervalSince1970: 1_000), t1 = Date(timeIntervalSince1970: 2_000)
+            let start = ActivityClock.advance([gone: .init(group: .idle, since: t0)],
+                                              current: [a: .working, b: .working], now: t0)
+            let later = ActivityClock.advance(start, current: [a: .working, b: .unseen], now: t1)
+            record("activity clock: same group keeps its stamp, a new group restamps",
+                   later[a]?.since == t0 && later[b] == .init(group: .unseen, since: t1), "\(later)")
+            record("activity clock: sessions no longer open are dropped",
+                   start[gone] == nil && start.count == 2)
+            let base = Date(timeIntervalSince1970: 0)
+            let shown = [59, 60, 3599, 3600, 86_399, 86_400, -5].map {
+                ActivityClock.elapsed(since: base, now: base.addingTimeInterval(TimeInterval($0)))
+            }
+            record("activity clock: elapsed reads now / m / h / d",
+                   shown == ["now", "1m", "59m", "1h", "23h", "1d", "now"], "\(shown)")
+        }
+
         // --- MacroPadUnreadTracker edge detection
         do {
             let idA = UUID()
