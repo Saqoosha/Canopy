@@ -936,11 +936,12 @@ final class ControlSession {
                     errors.append(["machineId": machineId, "error": failure.message(machineName: machineId)])
                 case .success(let result):
                     let machine = result["machine"] as? String ?? machineId
+                    var unopened = 0
                     for peer in result["peers"] as? [[String: Any]] ?? [] {
                         guard let socket = peer["socket"] as? String else { continue }
                         guard let proxy = PeerRelay.shared.proxy(for: .init(machineId: machineId, socket: socket),
                                                                  in: directory) else {
-                            errors.append(["machineId": machineId, "error": "could not open a local proxy in \(directory) for \(socket)"])
+                            unopened += 1
                             continue
                         }
                         var row = peer
@@ -948,6 +949,10 @@ final class ControlSession {
                         row["machine"] = machine
                         row["address"] = "uds:\(proxy)"
                         rows.append(row)
+                    }
+                    if unopened > 0 {
+                        errors.append(["machineId": machineId,
+                                       "error": "could not open \(unopened) local proxy socket(s) in \(directory)"])
                     }
                 }
             }

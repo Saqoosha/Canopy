@@ -53,9 +53,14 @@ final class PeerRelay {
         let used: Date
     }
 
+    private struct Proxy {
+        let route: Route
+        var used: Date
+        let fd: Int32
+    }
+
     /// Proxy path → the remote session it stands for.
-    private var routes: [String: Route] = [:]
-    private var used: [String: Date] = [:]
+    private var proxies: [String: Proxy] = [:]
     private var restored = false
 
     private static var routesFile: URL {
@@ -114,21 +119,19 @@ final class PeerRelay {
         }
         let cutoff = Date().addingTimeInterval(-Self.routeLifetime)
         for (path, entry) in saved where entry.used > cutoff {
-            used[path] = entry.used
-            _ = proxy(for: entry.route, in: (path as NSString).deletingLastPathComponent)
+            _ = proxy(for: entry.route, in: (path as NSString).deletingLastPathComponent, used: entry.used)
         }
     }
 
     /// The proxy socket standing for `route`, opened if it is not already.
-    func proxy(for route: Route, in directory: String) -> String? {
+    func proxy(for route: Route, in directory: String, used: Date = Date()) -> String? {
         let path = (directory as NSString).appendingPathComponent(Self.proxyName(route))
-        if routes[path] == route, Self.isSocket(path) {
+        if proxies[path]?.route == route, Self.isSocket(path) {
             touch(path)
             return path
         }
         guard let fd = Self.openListener(at: path) else { return nil }
-        routes[path] = route
-        used[path] = Date()
+        proxies[path] = Proxy(route: route, used: used, fd: fd)
         save()
         Self.startAccepting(fd: fd, proxy: path)
         logger.notice("proxy \(path, privacy: .public) → \(route.machineId, privacy: .public) \(route.socket, privacy: .public)")
@@ -145,19 +148,19 @@ final class PeerRelay {
     }
 
     private func touch(_ path: String) {
-        guard Date().timeIntervalSince(used[path] ?? .distantPast) > 3600 else { return }
-        used[path] = Date()
+        guard let last = proxies[path]?.used, Date().timeIntervalSince(last) > 3600 else { return }
+        proxies[path]?.used = Date()
         save()
     }
 
-    /// The accept loop ended, so the next `proxy(for:)` must open the socket again.
-    private func closed(_ path: String) {
-        routes.removeValue(forKey: path)
+    /// The accept loop on `fd` ended, so the next `proxy(for:)` must open the socket again.
+    private func closed(_ path: String, fd: Int32) {
+        guard proxies[path]?.fd == fd else { return }
+        proxies.removeValue(forKey: path)
     }
 
     private func save() {
-        var saved: [String: Saved] = [:]
-        for (path, route) in routes { saved[path] = Saved(route: route, used: used[path] ?? Date()) }
+        let saved = proxies.mapValues { Saved(route: $0.route, used: $0.used) }
         do {
             let data = try JSONEncoder().encode(saved)
             try FileManager.default.createDirectory(at: Self.routesFile.deletingLastPathComponent(),
@@ -171,7 +174,7 @@ final class PeerRelay {
     // MARK: - Sending side
 
     private func forward(_ line: String, from proxy: String) {
-        guard let route = routes[proxy] else {
+        guard let route = proxies[proxy]?.route else {
             logger.error("no route for \(proxy, privacy: .public); dropping a line")
             return
         }
@@ -275,7 +278,10 @@ final class PeerRelay {
             logger.error("could not open proxy \(path, privacy: .public): \(step, privacy: .public) \(String(cString: strerror(errno)), privacy: .public)")
             return nil
         }
-        guard var addr = address(path) else { return failed("path too long") }
+        guard var addr = address(path) else {
+            logger.error("could not open proxy \(path, privacy: .public): path too long")
+            return nil
+        }
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return failed("socket") }
         unlink(path)
@@ -299,7 +305,7 @@ final class PeerRelay {
                     if errno == EINTR || errno == ECONNABORTED { continue }
                     logger.error("accept on \(proxy, privacy: .public) failed: errno \(errno)")
                     close(fd)
-                    Task { @MainActor in PeerRelay.shared.closed(proxy) }
+                    Task { @MainActor in PeerRelay.shared.closed(proxy, fd: fd) }
                     return
                 }
                 Thread.detachNewThread { readLines(client, proxy: proxy) }
