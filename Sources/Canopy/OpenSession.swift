@@ -182,14 +182,22 @@ final class OpenSession: Identifiable, Hashable {
 
     /// One line saying what the session last asked for or said: the latest
     /// permission request or question, or the first line of the last turn's
-    /// final message. Written by the daemon's shim (`AttentionLine`), carried
-    /// to the GUI in `session_state`, and shown under the sidebar title only
-    /// while the row is in `Needs you` or `Done · unseen`.
+    /// final message. Written by the shim (`AttentionLine`); the sidebar shows
+    /// it only while the row is in `Needs you` or `Done · unseen`.
     var attentionLine: String?
 
     /// Running `run_in_background` Bash/Agent tasks, for the sidebar's
     /// `bg: N` badge. Written by the shim alongside `isWaiting`.
     var backgroundTaskCount: Int = 0
+
+    /// When the daemon saw this session enter its current status group; seeds
+    /// the GUI's `ActivityClock` for a session it has not stamped yet.
+    var daemonActivitySince: Date?
+
+    func applyDaemonActivitySince(_ unixSeconds: Double?) {
+        let since = unixSeconds.map { Date(timeIntervalSince1970: $0) }
+        if since != daemonActivitySince { daemonActivitySince = since }
+    }
     /// The first turn composed on the launch screen (text and/or images),
     /// waiting for this session's CLI to come up.
     ///

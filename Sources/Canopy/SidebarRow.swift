@@ -1,8 +1,7 @@
 import Foundation
 
 /// How closed sidebar rows are grouped into sections. `.status` also splits
-/// the Open block by `SidebarStatusGroup`; its closed rows group by date,
-/// because a closed session has no activity to group by.
+/// the Open block by `SidebarStatusGroup`; its closed rows group by date.
 enum GroupingMode: String, CaseIterable {
     case date = "Date"
     case project = "Project"
@@ -11,8 +10,7 @@ enum GroupingMode: String, CaseIterable {
 }
 
 /// The Open block's sections in `.status` mode, in display order: what the
-/// user owes something to first. Each section keeps the rows' incoming
-/// (pane) order, so a row only moves when its state changes group.
+/// user owes something to first. Each section keeps the rows' sidebar order.
 enum SidebarStatusGroup: CaseIterable {
     case needsYou
     case unseen
@@ -27,6 +25,10 @@ enum SidebarStatusGroup: CaseIterable {
         case .idle: "Idle"
         }
     }
+
+    /// Whether a row in this group shows `OpenSession.attentionLine`; on a
+    /// working or idle row the line is history, not a request.
+    var showsAttentionLine: Bool { self == .needsYou || self == .unseen }
 
     /// `.error` sits with `.asking`: both stay stuck until the user acts.
     /// `.background` sits with `.working`: alive, and not the user's turn.
@@ -65,15 +67,18 @@ enum ActivityClock {
         let since: Date
     }
 
-    /// Sessions absent from `current` are dropped; a new session starts now.
+    /// Sessions absent from `current` are dropped. A session with no stamp
+    /// yet starts at its seed (the daemon's stamp, so a GUI relaunch keeps
+    /// the time), else now; a group change always starts now.
     static func advance(_ previous: [OpenSession.ID: Stamp],
                         current: [OpenSession.ID: SidebarStatusGroup],
-                        now: Date) -> [OpenSession.ID: Stamp] {
+                        now: Date,
+                        seeds: [OpenSession.ID: Date] = [:]) -> [OpenSession.ID: Stamp] {
         current.reduce(into: [:]) { out, entry in
-            if let old = previous[entry.key], old.group == entry.value {
-                out[entry.key] = old
+            if let old = previous[entry.key] {
+                out[entry.key] = old.group == entry.value ? old : Stamp(group: entry.value, since: now)
             } else {
-                out[entry.key] = Stamp(group: entry.value, since: now)
+                out[entry.key] = Stamp(group: entry.value, since: min(seeds[entry.key] ?? now, now))
             }
         }
     }

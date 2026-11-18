@@ -869,7 +869,8 @@ final class ControlSession {
                 model: session.statusBar.model, messageCount: 0,
                 permissionMode: session.permissionMode.rawValue, accountId: session.claudeAccount?.id,
                 moveCount: session.moveCount, attentionLine: session.attentionLine,
-                backgroundTasks: session.backgroundTaskCount)
+                backgroundTasks: session.backgroundTaskCount,
+                stateSince: store.activityStamps[session.id]?.since.timeIntervalSince1970)
         }
     }
 

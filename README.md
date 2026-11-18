@@ -17,7 +17,7 @@ English | [日本語](README.ja.md)
 - **Native macOS window** — Claude Code's full React UI in a WKWebView
 - **Launcher** — directory picker, recent directories, session history, model/effort/permission selectors, GitHub clone, and a "start in a new worktree" toggle
 - **Sidebar shell** — sessions live in a persistent left sidebar; the detail pane swaps the active webview in place
-- **Status board** — group open sessions into Needs you / Done · unseen / Working / Idle; rows that owe you something show what they asked or said last, and every open row shows its running background tasks and how long it has been in its state
+- **Status board** — group open sessions into Needs you / Done · unseen / Working / Idle; rows that owe you something show what they asked or said last, and each row shows its background-task count and how long it has been in its group
 - **Split view** — up to 6 panes side by side, Cmd+1–9 to focus one, drag the dividers to resize
 - **Session resume** — pick up where you left off with instant history replay
 - **Sessions outlive the window** — sessions run in a background service, so quitting the app does not stop them; reopen and the panes attach again. An app update restarts the service, and sessions resume from their transcripts

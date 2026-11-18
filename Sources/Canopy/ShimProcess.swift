@@ -2537,6 +2537,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// When non-empty the user is being asked to approve something; the
     /// sidebar shows a "raised hand" icon while at least one is outstanding.
     private var pendingPermissionRequestIds = Set<String>()
+    /// Arrival order of `pendingPermissionRequestIds`, for the attention line; may hold resolved ids.
+    private var pendingPermissionRequestOrder: [String] = []
+    /// The question of an AskUserQuestion seen in the assistant stream before its request arrives.
+    private var streamAskLine: String?
 
     /// Each outstanding request's `inputs` payload, keyed the same as
     /// `pendingPermissionRequestIds` and cleared everywhere that set is
@@ -6587,8 +6591,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 pendingAskUserQuestionRequestIds.insert(requestId)
             }
             if isNewPermissionRequest {
-                boundSession?.attentionLine = AttentionLine.forRequest(toolName: toolName,
-                                                                       inputs: request["inputs"])
+                pendingPermissionRequestOrder.append(requestId)
                 // Capped like `pending_requests`: the event outlives the request it describes.
                 let rendered = Self.renderedToolInput(request["inputs"])
                 ControlEventLog.shared.record(toolName == "AskUserQuestion" ? .asking : .permission,
@@ -6698,6 +6701,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         pendingPermissionRequestSuggestions.removeAll()
         pendingAskUserQuestionRequestIds.removeAll()
         lastAssistantHadAskUserQuestion = false
+        pendingPermissionRequestOrder.removeAll()
+        streamAskLine = nil
+        boundSession?.attentionLine = nil
         pendingBackgroundTaskIds.removeAll()
         bgTaskIdMap.removeAll()
         checkoutAfterRemoval = nil
@@ -6750,6 +6756,17 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let asking = !pendingPermissionRequestIds.isEmpty
             || lastAssistantHadAskUserQuestion
         boundSession?.isAsking = asking
+        pendingPermissionRequestOrder.removeAll { !pendingPermissionRequestIds.contains($0) }
+        let line: String?
+        if let oldest = pendingPermissionRequestOrder.first {
+            line = AttentionLine.forRequest(toolName: pendingPermissionRequestToolNames[oldest] ?? "",
+                                            inputs: pendingPermissionRequestInputs[oldest])
+        } else if lastAssistantHadAskUserQuestion {
+            line = streamAskLine ?? "AskUserQuestion"
+        } else {
+            return  // Nothing pending: the turn end owns the line.
+        }
+        if boundSession?.attentionLine != line { boundSession?.attentionLine = line }
     }
 
     /// Recompute the waiting flag. We only flip the sidebar to "waiting" when
@@ -8081,6 +8098,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 if block["type"] as? String == "tool_use",
                    block["name"] as? String == "AskUserQuestion" {
                     found = true
+                    streamAskLine = AttentionLine.forRequest(toolName: "AskUserQuestion", inputs: block["input"])
                     break
                 }
             }

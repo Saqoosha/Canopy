@@ -10087,6 +10087,72 @@ enum SidebarLogicProbe {
             record("background tasks: survive the session_state wire, absent while 0",
                    ControlProtocol.SessionRow(wire: bgRow.wire)?.backgroundTasks == 2
                        && bare.wire["backgroundTasks"] == nil)
+
+            let globCmd = AttentionLine.forRequest(toolName: "Bash", inputs: ["command": "rg foo src/**/*.swift", "description": ""])
+            let commentCmd = AttentionLine.forRequest(toolName: "Bash", inputs: ["command": "# cleanup\nrm -rf build"])
+            record("attention line: a request is shown as written, no Markdown stripping",
+                   globCmd == "Bash: rg foo src/**/*.swift" && commentCmd == "Bash: # cleanup",
+                   "\(String(describing: globCmd)) / \(String(describing: commentCmd))")
+            let kept = ["-5 tests failing", "#428 merged", "--force push?"].map { AttentionLine.forTurnEnd(finalText: $0) }
+            record("attention line: a turn end keeps a leading mark not followed by a space",
+                   kept == ["-5 tests failing", "#428 merged", "--force push?"], "\(kept)")
+            let fenced = AttentionLine.forTurnEnd(finalText: "```bash\nnpm test\n```\nAll green")
+            let listed = AttentionLine.forTurnEnd(finalText: "1. Fixed X")
+            record("attention line: a turn end skips fence lines and strips a numbered-list marker",
+                   fenced == "npm test" && listed == "Fixed X",
+                   "\(String(describing: fenced)) / \(String(describing: listed))")
+            let n = AttentionLine.maxCharacters
+            let exact = AttentionLine.firstLine(String(repeating: "y", count: n))
+            let over = AttentionLine.firstLine(String(repeating: "y", count: n + 1))
+            record("attention line: exactly maxCharacters is kept, one more is cut to maxCharacters",
+                   exact?.count == n && exact?.hasSuffix("…") == false && over?.count == n && over?.hasSuffix("…") == true)
+            record("attention line: only Needs you and Done · unseen rows show it",
+                   SidebarStatusGroup.allCases.filter(\.showsAttentionLine) == [.needsYou, .unseen])
+
+            // The daemon's half: list_sessions / session_state rows carry the three fields.
+            let wireStore = SessionStore()
+            let carried = OpenSession(origin: .local(FileManager.default.temporaryDirectory), resumeId: "attn-carried",
+                                      title: "T", project: "p", status: .live)
+            carried.attentionLine = "Bash: git push"
+            carried.backgroundTaskCount = 2
+            wireStore._probeSeedOpenSessions([carried])
+            var wireFrames: [[String: Any]] = []
+            let wireClient = ControlSession(store: wireStore, isLocal: true, allowBypass: { false }) { wireFrames.append($0) }
+            wireClient.handle(["type": "request", "id": "attn-list", "verb": "list_sessions", "params": [:] as [String: Any]])
+            wireClient.stop()
+            let wireRow = ((wireFrames.first { $0["id"] as? String == "attn-list" }?["result"] as? [String: Any])?["sessions"]
+                           as? [[String: Any]])?.first { $0["resumeId"] as? String == "attn-carried" }
+            record("attention line: the daemon's rows carry the line and the count",
+                   wireRow?["attentionLine"] as? String == "Bash: git push" && wireRow?["backgroundTasks"] as? Int == 2,
+                   "\(String(describing: wireRow))")
+
+            // The GUI's half: an update copies the fields and clears them again; an add copies them.
+            OpenSession.localSessionsRunInDaemon = true
+            defer { OpenSession.localSessionsRunInDaemon = false }
+            let guiStore = SessionStore()
+            let gui = OpenSession(origin: .local(FileManager.default.temporaryDirectory), resumeId: "attn-gui",
+                                  title: "T", project: "p", resumeIdIsExistingTranscript: true)
+            gui.daemonKey = "AK"
+            guiStore._probeSeedOpenSessions([gui])
+            func guiRow(key: String, resumeId: String, line: String?, bg: Int, since: Double?) -> ControlProtocol.SessionRow {
+                .init(key: key, resumeId: resumeId, title: "T", project: "p",
+                      cwd: FileManager.default.temporaryDirectory.path, state: "background", running: true, clients: 1,
+                      lastActiveAt: 0, model: "", messageCount: 0, permissionMode: "default", accountId: nil,
+                      attentionLine: line, backgroundTasks: bg, stateSince: since)
+            }
+            guiStore.applyDaemonSessions([guiRow(key: "AK", resumeId: "attn-gui", line: "x", bg: 2, since: 1_000)])
+            let copied = gui.attentionLine == "x" && gui.backgroundTaskCount == 2
+                && gui.daemonActivitySince == Date(timeIntervalSince1970: 1_000)
+            guiStore.applyDaemonSessions([guiRow(key: "AK", resumeId: "attn-gui", line: nil, bg: 0, since: nil)])
+            record("attention line: the GUI copies the fields on an update and clears them again",
+                   copied && gui.attentionLine == nil && gui.backgroundTaskCount == 0 && gui.daemonActivitySince == nil)
+            guiStore.applyDaemonSessions([guiRow(key: "AK", resumeId: "attn-gui", line: nil, bg: 0, since: nil),
+                                          guiRow(key: "NEW", resumeId: "attn-new", line: "y", bg: 3, since: 2_000)])
+            let added = guiStore.openSessions.first { $0.resumeId == "attn-new" }
+            record("attention line: a session the GUI adds keeps the fields",
+                   added?.attentionLine == "y" && added?.backgroundTaskCount == 3
+                       && added?.daemonActivitySince == Date(timeIntervalSince1970: 2_000),
+                   "\(String(describing: added?.attentionLine)) \(String(describing: added?.backgroundTaskCount))")
         }
 
         // --- ActivityClock: restamp on a group change only
@@ -10100,6 +10166,12 @@ enum SidebarLogicProbe {
                    later[a]?.since == t0 && later[b] == .init(group: .unseen, since: t1), "\(later)")
             record("activity clock: sessions no longer open are dropped",
                    start[gone] == nil && start.count == 2)
+            let c = UUID()
+            let seeded = ActivityClock.advance(later, current: [a: .working, c: .idle], now: t1,
+                                               seeds: [a: Date(timeIntervalSince1970: 1), c: t0])
+            let future = ActivityClock.advance([:], current: [c: .idle], now: t0, seeds: [c: t1])
+            record("activity clock: a seed starts a new session's stamp, an existing stamp ignores it, a future seed clamps to now",
+                   seeded[c]?.since == t0 && seeded[a]?.since == t0 && future[c]?.since == t0, "\(seeded)")
             let base = Date(timeIntervalSince1970: 0)
             let shown = [59, 60, 3599, 3600, 86_399, 86_400, -5].map {
                 ActivityClock.elapsed(since: base, now: base.addingTimeInterval(TimeInterval($0)))

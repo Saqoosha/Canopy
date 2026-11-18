@@ -1120,15 +1120,11 @@ private struct SidebarRowView: View {
         return PeerNameStore.shared.name(forResumeId: session.resumeId)
     }
 
-    /// Only for rows that owe the user something; on a working or idle row
-    /// the last line is history, not a request.
     private var attentionLine: String? {
         guard case .open(let session) = row,
-              let line = session.attentionLine else { return nil }
-        switch SidebarStatusGroup.of(SessionActivity.of(session, isUnread: isUnread)) {
-        case .needsYou, .unseen: return line
-        case .working, .idle: return nil
-        }
+              SidebarStatusGroup.of(SessionActivity.of(session, isUnread: isUnread)).showsAttentionLine
+        else { return nil }
+        return session.attentionLine
     }
 
     private var subtitleColor: Color { .secondary }

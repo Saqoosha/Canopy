@@ -132,14 +132,15 @@ final class SessionStore {
             // Fires before the mutation lands; re-read on the next turn.
             Task { @MainActor [weak self] in self?.trackActivityClock() }
         }
-        let next = ActivityClock.advance(activityStamps, current: current, now: Date())
+        let seeds = Dictionary(openSessions.compactMap { s in s.daemonActivitySince.map { (s.id, $0) } },
+                               uniquingKeysWith: { first, _ in first })
+        let next = ActivityClock.advance(activityStamps, current: current, now: Date(), seeds: seeds)
         if next != activityStamps { activityStamps = next }
     }
 
-    /// The Open block as the sidebar draws it: one unnamed section in pane
+    /// The Open block as the sidebar draws it: one unnamed section in sidebar
     /// order, or the `SidebarStatusGroup` sections in `.status` mode.
-    /// Cmd+Ctrl+1–9 reads the same order, so "the N-th open row" is the
-    /// N-th one on screen.
+    /// Cmd+Ctrl+1–9 reads the same order.
     func openSections(_ openRows: [SidebarRow]) -> [(group: SidebarStatusGroup?, rows: [SidebarRow])] {
         guard groupingMode == .status else { return openRows.isEmpty ? [] : [(nil, openRows)] }
         let unread = unreadSessionIds
@@ -1818,6 +1819,7 @@ final class SessionStore {
             session.isWaiting = activity == .background
             if row.attentionLine != session.attentionLine { session.attentionLine = row.attentionLine }
             if row.backgroundTasks != session.backgroundTaskCount { session.backgroundTaskCount = row.backgroundTasks }
+            session.applyDaemonActivitySince(row.stateSince)
             if !row.model.isEmpty { session.statusBar.model = row.model }
             if let mode = PermissionMode(rawValue: row.permissionMode), mode != session.permissionMode {
                 session.permissionMode = mode
@@ -1847,6 +1849,11 @@ final class SessionStore {
                                       resumeIdIsExistingTranscript: true)
             session.daemonKey = key
             session.moveCount = row.moveCount
+            if key != nil {
+                session.attentionLine = row.attentionLine
+                session.backgroundTaskCount = row.backgroundTasks
+                session.applyDaemonActivitySince(row.stateSince)
+            }
             openSessions.append(session)
         }
         for row in plan.adds {
@@ -1859,6 +1866,7 @@ final class SessionStore {
             // Every push repeats the reaped rows; an assignment wakes observers even when equal.
             let settled = session.status == .dormant && session.daemonKey == nil && session.resumeIdIsExistingTranscript
                 && session.resumeId == update.row.resumeId && !session.isThinking && !session.isAsking && !session.isWaiting
+                && session.backgroundTaskCount == 0 && session.attentionLine == nil
             guard !settled else { continue }
             if session.status != .dormant { detachDaemonSession(session) }
             session.daemonKey = nil
@@ -1867,6 +1875,8 @@ final class SessionStore {
             session.isThinking = false
             session.isAsking = false
             session.isWaiting = false
+            session.backgroundTaskCount = 0
+            session.attentionLine = nil
         }
         for row in plan.stoppedAdds where !row.cwd.isEmpty && !openSessions.contains(where: { $0.resumeId == row.resumeId }) {
             addDormant(row, key: nil)
