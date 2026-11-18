@@ -267,6 +267,7 @@ final class DaemonDelegate {
             KeepAliveCoordinator.daemonTargets(store.openSessions).map { ("session \($0.resumeId.prefix(8))", $0) }
         }
         KeepAliveCoordinator.shared.start()
+        store.startActivityClock()
 
         let reaper = DaemonReaper(store: store)
         self.reaper = reaper

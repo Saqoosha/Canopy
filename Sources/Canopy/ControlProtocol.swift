@@ -339,6 +339,12 @@ enum ControlProtocol {
         let accountId: String?
         /// Moves since this daemon opened the session; absent on the wire while 0.
         let moveCount: Int
+        /// `OpenSession.attentionLine`; absent on the wire while nil.
+        let attentionLine: String?
+        /// `OpenSession.backgroundTaskCount`; absent on the wire while 0.
+        let backgroundTasks: Int
+        /// Unix seconds the daemon's `ActivityClock` stamped; absent before it has one.
+        let stateSince: Double?
 
         var wire: [String: Any] {
             var dict: [String: Any] = [
@@ -349,12 +355,16 @@ enum ControlProtocol {
             if let key { dict["key"] = key }
             if let accountId { dict["accountId"] = accountId }
             if moveCount > 0 { dict["moveCount"] = moveCount }
+            if let attentionLine { dict["attentionLine"] = attentionLine }
+            if backgroundTasks > 0 { dict["backgroundTasks"] = backgroundTasks }
+            if let stateSince { dict["stateSince"] = stateSince }
             return dict
         }
 
         init(key: String?, resumeId: String, title: String, project: String, cwd: String, state: String,
              running: Bool, clients: Int, lastActiveAt: Double, model: String, messageCount: Int,
-             permissionMode: String, accountId: String?, moveCount: Int = 0) {
+             permissionMode: String, accountId: String?, moveCount: Int = 0, attentionLine: String? = nil,
+             backgroundTasks: Int = 0, stateSince: Double? = nil) {
             self.key = key
             self.resumeId = resumeId
             self.title = title
@@ -369,6 +379,9 @@ enum ControlProtocol {
             self.permissionMode = permissionMode
             self.accountId = accountId
             self.moveCount = moveCount
+            self.attentionLine = attentionLine
+            self.backgroundTasks = backgroundTasks
+            self.stateSince = stateSince
         }
 
         init?(wire: [String: Any]) {
@@ -380,7 +393,10 @@ enum ControlProtocol {
                       lastActiveAt: (wire["lastActiveAt"] as? NSNumber)?.doubleValue ?? 0,
                       model: wire["model"] as? String ?? "", messageCount: wire["messageCount"] as? Int ?? 0,
                       permissionMode: wire["permissionMode"] as? String ?? "",
-                      accountId: wire["accountId"] as? String, moveCount: wire["moveCount"] as? Int ?? 0)
+                      accountId: wire["accountId"] as? String, moveCount: wire["moveCount"] as? Int ?? 0,
+                      attentionLine: wire["attentionLine"] as? String,
+                      backgroundTasks: wire["backgroundTasks"] as? Int ?? 0,
+                      stateSince: (wire["stateSince"] as? NSNumber)?.doubleValue)
         }
     }
 

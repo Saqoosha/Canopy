@@ -73,6 +73,14 @@ This list is partial.
 `list_sessions` takes optional `limit` (default 50) and `scope` (`open`
 default, or `recent`).
 
+An open row, here and in `session_state`, may also carry:
+
+| Field | Meaning |
+|---|---|
+| `attentionLine` | One line naming the oldest pending permission request or question (the first question, Bash's description or command, a file tool's file name, or the tool name), else the first line of the last turn's final message; cut at 120 characters. Absent while there is none |
+| `backgroundTasks` | Running background Bash/Agent tasks. Absent while 0 |
+| `stateSince` | Unix seconds when the session entered its current status group: Needs you, Working, or Idle (which includes Done · unseen) |
+
 `scope: "recent"` lists past sessions, most recently active first. These are
 the rows `open_session`'s `resumeSessionId` continues. Without filters it
 returns the newest sessions the daemon keeps (about 50). With any filter

@@ -1,10 +1,107 @@
 import Foundation
 
-/// How closed sidebar rows are grouped into sections.
+/// How closed sidebar rows are grouped into sections. `.status` also splits
+/// the Open block by `SidebarStatusGroup`; its closed rows group by date.
 enum GroupingMode: String, CaseIterable {
     case date = "Date"
     case project = "Project"
     case env = "Env"
+    case status = "Status"
+}
+
+/// The Open block's sections in `.status` mode, in display order: what the
+/// user owes something to first. Each section keeps the rows' sidebar order.
+enum SidebarStatusGroup: CaseIterable {
+    case needsYou
+    case unseen
+    case working
+    case idle
+
+    var title: String {
+        switch self {
+        case .needsYou: "Needs you"
+        case .unseen: "Done · unseen"
+        case .working: "Working"
+        case .idle: "Idle"
+        }
+    }
+
+    /// Whether a row shows `OpenSession.attentionLine`: only while it asks or
+    /// is unseen. An error row (also Needs you) would show a stale line.
+    static func showsAttentionLine(_ activity: SessionActivity) -> Bool {
+        activity == .asking || activity == .unread
+    }
+
+    /// `.error` sits with `.asking`: both stay stuck until the user acts.
+    /// `.background` sits with `.working`: alive, and not the user's turn.
+    static func of(_ activity: SessionActivity) -> SidebarStatusGroup {
+        switch activity {
+        case .asking, .error: .needsYou
+        case .unread: .unseen
+        case .working, .background: .working
+        case .idle, .empty: .idle
+        }
+    }
+
+    /// Non-empty sections only. A launcher row has no session and is filed
+    /// under `.idle`.
+    static func sections(
+        _ openRows: [SidebarRow],
+        isUnread: (OpenSession.ID) -> Bool
+    ) -> [(group: SidebarStatusGroup, rows: [SidebarRow])] {
+        let grouped = Dictionary(grouping: openRows) { row -> SidebarStatusGroup in
+            if case .open(let s) = row { return of(SessionActivity.of(s, isUnread: isUnread(s.id))) }
+            return .idle
+        }
+        return allCases.compactMap { group in
+            grouped[group].map { (group, $0) }
+        }
+    }
+}
+
+/// When each open session entered its current `SidebarStatusGroup`, for the
+/// elapsed time on its sidebar row. Only a group change restamps: working and
+/// background are one group, so a turn that leaves a shell running keeps its
+/// clock.
+enum ActivityClock {
+    struct Stamp: Equatable {
+        let group: SidebarStatusGroup
+        let since: Date
+    }
+
+    /// Sessions absent from `current` are dropped. A group change starts the
+    /// clock now; otherwise an earlier seed (the daemon's stamp, so a GUI
+    /// relaunch keeps the time) wins. Unseen counts as idle here: both run
+    /// from the turn end, and the daemon has no unread set.
+    static func advance(_ previous: [OpenSession.ID: Stamp],
+                        current: [OpenSession.ID: SidebarStatusGroup],
+                        now: Date,
+                        seeds: [OpenSession.ID: Date] = [:]) -> [OpenSession.ID: Stamp] {
+        current.reduce(into: [:]) { out, entry in
+            let group = clockGroup(entry.value)
+            let seed = min(seeds[entry.key] ?? now, now)
+            if let old = previous[entry.key], old.group == group {
+                out[entry.key] = Stamp(group: group, since: min(old.since, seed))
+            } else {
+                out[entry.key] = Stamp(group: group, since: previous[entry.key] == nil ? seed : now)
+            }
+        }
+    }
+
+    static func clockGroup(_ group: SidebarStatusGroup) -> SidebarStatusGroup {
+        group == .unseen ? .idle : group
+    }
+
+    /// "now" under a minute, then whole minutes, hours, days.
+    static func elapsed(since: Date, now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(since)))
+        switch seconds {
+        case ..<60: return "now"
+        case ..<3600: return "\(seconds / 60)m"
+        case ..<86400: return "\(seconds / 3600)h"
+        default: return "\(seconds / 86400)d"
+        }
+    }
 }
 
 /// One of another Mac's open sessions, as the relay last reported it.

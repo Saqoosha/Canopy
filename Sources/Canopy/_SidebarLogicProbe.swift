@@ -10004,6 +10004,231 @@ enum SidebarLogicProbe {
                    "unique=\(colors.count) cases=\(SessionActivity.allCases.count)")
         }
 
+        // --- Sidebar Status grouping of the Open block
+        do {
+            func live(_ id: String) -> OpenSession {
+                OpenSession(origin: .local(cwd), resumeId: id, title: id, project: "P", status: .live)
+            }
+            let idleA = live("st-idle-a")
+            let asking = live("st-ask"); asking.isAsking = true
+            let unread = live("st-unread")
+            let waiting = live("st-wait"); waiting.isWaiting = true
+            let crashed = OpenSession(origin: .local(cwd), resumeId: "st-crash", title: "c",
+                                      project: "P", status: .crashed(exitCode: 1))
+            let idleB = live("st-idle-b")
+            let launcher = SidebarRow.launcher(UUID())
+            let input: [SidebarRow] = [.open(idleA), .open(asking), .open(unread), .open(waiting),
+                                       .open(crashed), .open(idleB), launcher]
+            let sections = SidebarStatusGroup.sections(input) { $0 == unread.id }
+            let got = sections.map { ($0.group, $0.rows.map(\.id)) }
+            let want: [(SidebarStatusGroup, [String])] = [
+                (.needsYou, [SidebarRow.open(asking).id, SidebarRow.open(crashed).id]),
+                (.unseen, [SidebarRow.open(unread).id]),
+                (.working, [SidebarRow.open(waiting).id]),
+                (.idle, [SidebarRow.open(idleA).id, SidebarRow.open(idleB).id, launcher.id]),
+            ]
+            record("status grouping: needs-you first, pane order kept inside each group",
+                   got.count == want.count && zip(got, want).allSatisfy { $0.0 == $1.0 && $0.1 == $1.1 },
+                   "got \(got)")
+            record("status grouping: empty groups are dropped",
+                   SidebarStatusGroup.sections([.open(idleA)]) { _ in false }.map(\.group) == [.idle])
+
+            let a = UUID(), b = UUID(), c = UUID(), other = UUID()
+            let t = [a, b, c]
+            let next = { SessionStore.nextAttentionTarget(t, current: $0, delta: $1) }
+            record("attention jump: forward and back step from the current target",
+                   next(a, 1) == b && next(b, -1) == a, "\(String(describing: next(a, 1)))")
+            record("attention jump: wraps at both ends",
+                   next(c, 1) == a && next(a, -1) == c)
+            record("attention jump: from a non-target, forward starts first and back starts last",
+                   next(other, 1) == a && next(nil, -1) == c)
+            record("attention jump: no targets → nil",
+                   SessionStore.nextAttentionTarget([], current: a, delta: 1) == nil)
+        }
+
+        // --- AttentionLine: one plain line per request or turn end
+        do {
+            let ask = AttentionLine.forRequest(toolName: "AskUserQuestion", inputs: [
+                "questions": [["question": "Which sunset date?", "header": "Date", "options": []]],
+            ])
+            record("attention line: AskUserQuestion shows its first question", ask == "Which sunset date?", "\(String(describing: ask))")
+            let bashDesc = AttentionLine.forRequest(toolName: "Bash",
+                                                    inputs: ["command": "rm -rf build", "description": "Clean build dir"])
+            let bashCmd = AttentionLine.forRequest(toolName: "Bash", inputs: ["command": "git push\n--force"])
+            record("attention line: Bash prefers description, else the command's first line",
+                   bashDesc == "Bash: Clean build dir" && bashCmd == "Bash: git push",
+                   "\(String(describing: bashDesc)) / \(String(describing: bashCmd))")
+            let edit = AttentionLine.forRequest(toolName: "Edit", inputs: ["file_path": "/a/b/Sidebar.swift"])
+            record("attention line: file tools show the file name", edit == "Edit: Sidebar.swift", "\(String(describing: edit))")
+            record("attention line: other tools show the tool name",
+                   AttentionLine.forRequest(toolName: "WebFetch", inputs: ["url": "x"]) == "WebFetch")
+            let turn = AttentionLine.forTurnEnd(finalText: "\n\n## **Done.** All tests pass\n\nmore")
+            record("attention line: turn end takes the first non-blank line, Markdown marks removed",
+                   turn == "Done. All tests pass", "\(String(describing: turn))")
+            let long = AttentionLine.forTurnEnd(finalText: String(repeating: "x", count: 500)) ?? ""
+            record("attention line: cut to maxCharacters with an ellipsis",
+                   long.count == AttentionLine.maxCharacters && long.hasSuffix("…"), "count \(long.count)")
+            record("attention line: blank text → nil", AttentionLine.forTurnEnd(finalText: " \n ") == nil)
+
+            let row = ControlProtocol.SessionRow(key: "K", resumeId: "r", title: "t", project: "p", cwd: "/p",
+                                                 state: "asking", running: true, clients: 1, lastActiveAt: 0,
+                                                 model: "", messageCount: 0, permissionMode: "", accountId: nil,
+                                                 attentionLine: "Bash: git push")
+            let bare = ControlProtocol.SessionRow(key: "K", resumeId: "r", title: "t", project: "p", cwd: "/p",
+                                                  state: "idle", running: true, clients: 1, lastActiveAt: 0,
+                                                  model: "", messageCount: 0, permissionMode: "", accountId: nil)
+            record("attention line: survives the session_state wire, absent while nil",
+                   ControlProtocol.SessionRow(wire: row.wire)?.attentionLine == "Bash: git push"
+                       && bare.wire["attentionLine"] == nil)
+            let bgRow = ControlProtocol.SessionRow(key: "K", resumeId: "r", title: "t", project: "p", cwd: "/p",
+                                                   state: "background", running: true, clients: 1, lastActiveAt: 0,
+                                                   model: "", messageCount: 0, permissionMode: "", accountId: nil,
+                                                   backgroundTasks: 2)
+            record("background tasks: survive the session_state wire, absent while 0",
+                   ControlProtocol.SessionRow(wire: bgRow.wire)?.backgroundTasks == 2
+                       && bare.wire["backgroundTasks"] == nil)
+
+            let globCmd = AttentionLine.forRequest(toolName: "Bash", inputs: ["command": "rg foo src/**/*.swift", "description": ""])
+            let commentCmd = AttentionLine.forRequest(toolName: "Bash", inputs: ["command": "# cleanup\nrm -rf build"])
+            record("attention line: a request is shown as written, no Markdown stripping",
+                   globCmd == "Bash: rg foo src/**/*.swift" && commentCmd == "Bash: # cleanup",
+                   "\(String(describing: globCmd)) / \(String(describing: commentCmd))")
+            let kept = ["-5 tests failing", "#428 merged", "--force push?"].map { AttentionLine.forTurnEnd(finalText: $0) }
+            record("attention line: a turn end keeps a leading mark not followed by a space",
+                   kept == ["-5 tests failing", "#428 merged", "--force push?"], "\(kept)")
+            let fenced = AttentionLine.forTurnEnd(finalText: "```bash\nnpm test\n```\nAll green")
+            let listed = [AttentionLine.forTurnEnd(finalText: "1. Fixed X"),
+                          AttentionLine.forTurnEnd(finalText: "> - Note"),
+                          AttentionLine.forTurnEnd(finalText: "- [ ] Fix X")]
+            record("attention line: a turn end skips code blocks and strips nested list, task and quote markers",
+                   fenced == "All green" && listed == ["Fixed X", "Note", "Fix X"],
+                   "\(String(describing: fenced)) / \(listed)")
+            let n = AttentionLine.maxCharacters
+            let exact = AttentionLine.firstLine(String(repeating: "y", count: n))
+            let over = AttentionLine.firstLine(String(repeating: "y", count: n + 1))
+            record("attention line: exactly maxCharacters is kept, one more is cut to maxCharacters",
+                   exact?.count == n && exact?.hasSuffix("…") == false && over?.count == n && over?.hasSuffix("…") == true)
+            record("attention line: only asking and unread rows show it, not error rows",
+                   SessionActivity.allCases.filter(SidebarStatusGroup.showsAttentionLine) == [.asking, .unread])
+            let ruled = AttentionLine.forTurnEnd(finalText: "---\n- \nBuild completed")
+            record("attention line: a turn end moves past lines that are only Markdown marks",
+                   ruled == "Build completed", "\(String(describing: ruled))")
+            let longDesc = AttentionLine.forRequest(toolName: "Bash",
+                                                    inputs: ["description": String(repeating: "d", count: AttentionLine.maxCharacters)])
+            record("attention line: the cap covers a request's prefix too",
+                   longDesc?.count == AttentionLine.maxCharacters && longDesc?.hasPrefix("Bash: ") == true,
+                   "count \(longDesc?.count ?? -1)")
+
+            // Cmd+J: the keystroke clears the current session's unread mark first, so it is ranked as unread.
+            let jumpStore = SessionStore()
+            func liveJ(_ id: String) -> OpenSession {
+                OpenSession(origin: .local(FileManager.default.temporaryDirectory), resumeId: id, title: id,
+                            project: "p", status: .live)
+            }
+            let ja = liveJ("j-a"); ja.isAsking = true
+            let jb = liveJ("j-b"), jc = liveJ("j-c"), jd = liveJ("j-d")
+            jumpStore._probeSeedOpenSessions([ja, jb, jc, jd])
+            jumpStore.setUnreadSessionIds([jc.id])
+            record("attention jump: targets are needs-you then unseen; idle rows are out",
+                   jumpStore.attentionSessionIds == [ja.id, jc.id], "\(jumpStore.attentionSessionIds)")
+            func focusedJumpSession(_ store: SessionStore) -> UUID? {
+                if case .session(let id) = store.focusedPane?.content { return id }
+                return nil
+            }
+            // jb was unseen; the Cmd+J keystroke clears it just before the jump.
+            jumpStore.setUnreadSessionIds([jb.id, jc.id])
+            jumpStore.openInFocusedPane(jb.id)
+            jumpStore.setUnreadSessionIds([jc.id])
+            jumpStore.jumpToAttentionSession(delta: 1)
+            record("attention jump: a session whose unread mark the keystroke just cleared keeps its rank",
+                   focusedJumpSession(jumpStore) == jc.id, "\(String(describing: focusedJumpSession(jumpStore)))")
+            // jd was never unread: it is not a target, so Cmd+J starts at the first one.
+            let neverStore = SessionStore()
+            neverStore._probeSeedOpenSessions([ja, jd, jc])
+            neverStore.setUnreadSessionIds([jc.id])
+            neverStore.openInFocusedPane(jd.id)
+            neverStore.jumpToAttentionSession(delta: 1)
+            record("attention jump: an idle session that was never unread does not join the cycle",
+                   focusedJumpSession(neverStore) == ja.id, "\(String(describing: focusedJumpSession(neverStore)))")
+
+            // The daemon's half: list_sessions / session_state rows carry the three fields.
+            let wireStore = SessionStore()
+            let carried = OpenSession(origin: .local(FileManager.default.temporaryDirectory), resumeId: "attn-carried",
+                                      title: "T", project: "p", status: .live)
+            carried.attentionLine = "Bash: git push"
+            carried.backgroundTaskCount = 2
+            wireStore._probeSeedOpenSessions([carried])
+            var wireFrames: [[String: Any]] = []
+            let wireClient = ControlSession(store: wireStore, isLocal: true, allowBypass: { false }) { wireFrames.append($0) }
+            wireClient.handle(["type": "request", "id": "attn-list", "verb": "list_sessions", "params": [:] as [String: Any]])
+            wireClient.stop()
+            let wireRow = ((wireFrames.first { $0["id"] as? String == "attn-list" }?["result"] as? [String: Any])?["sessions"]
+                           as? [[String: Any]])?.first { $0["resumeId"] as? String == "attn-carried" }
+            record("attention line: the daemon's rows carry the line and the count",
+                   wireRow?["attentionLine"] as? String == "Bash: git push" && wireRow?["backgroundTasks"] as? Int == 2,
+                   "\(String(describing: wireRow))")
+
+            // The GUI's half: an update copies the fields and clears them again; an add copies them.
+            OpenSession.localSessionsRunInDaemon = true
+            defer { OpenSession.localSessionsRunInDaemon = false }
+            let guiStore = SessionStore()
+            let gui = OpenSession(origin: .local(FileManager.default.temporaryDirectory), resumeId: "attn-gui",
+                                  title: "T", project: "p", resumeIdIsExistingTranscript: true)
+            gui.daemonKey = "AK"
+            guiStore._probeSeedOpenSessions([gui])
+            func guiRow(key: String, resumeId: String, line: String?, bg: Int, since: Double?) -> ControlProtocol.SessionRow {
+                .init(key: key, resumeId: resumeId, title: "T", project: "p",
+                      cwd: FileManager.default.temporaryDirectory.path, state: "background", running: true, clients: 1,
+                      lastActiveAt: 0, model: "", messageCount: 0, permissionMode: "default", accountId: nil,
+                      attentionLine: line, backgroundTasks: bg, stateSince: since)
+            }
+            guiStore.applyDaemonSessions([guiRow(key: "AK", resumeId: "attn-gui", line: "x", bg: 2, since: 1_000)])
+            let copied = gui.attentionLine == "x" && gui.backgroundTaskCount == 2
+                && gui.daemonActivitySince == Date(timeIntervalSince1970: 1_000)
+            guiStore.applyDaemonSessions([guiRow(key: "AK", resumeId: "attn-gui", line: nil, bg: 0, since: nil)])
+            record("attention line: the GUI copies the fields on an update and clears them again",
+                   copied && gui.attentionLine == nil && gui.backgroundTaskCount == 0 && gui.daemonActivitySince == nil)
+            guiStore.applyDaemonSessions([guiRow(key: "AK", resumeId: "attn-gui", line: nil, bg: 0, since: nil),
+                                          guiRow(key: "NEW", resumeId: "attn-new", line: "y", bg: 3, since: 2_000)])
+            let added = guiStore.openSessions.first { $0.resumeId == "attn-new" }
+            record("attention line: a session the GUI adds keeps the fields",
+                   added?.attentionLine == "y" && added?.backgroundTaskCount == 3
+                       && added?.daemonActivitySince == Date(timeIntervalSince1970: 2_000),
+                   "\(String(describing: added?.attentionLine)) \(String(describing: added?.backgroundTaskCount))")
+        }
+
+        // --- ActivityClock: restamp on a group change only
+        do {
+            let a = UUID(), b = UUID(), gone = UUID()
+            let t0 = Date(timeIntervalSince1970: 1_000), t1 = Date(timeIntervalSince1970: 2_000)
+            let start = ActivityClock.advance([gone: .init(group: .idle, since: t0)],
+                                              current: [a: .working, b: .working], now: t0)
+            let later = ActivityClock.advance(start, current: [a: .working, b: .unseen], now: t1)
+            record("activity clock: same group keeps its stamp, a new group restamps",
+                   later[a]?.since == t0 && later[b] == .init(group: .idle, since: t1), "\(later)")
+            let t2 = Date(timeIntervalSince1970: 3_000)
+            let seen = ActivityClock.advance(later, current: [a: .working, b: .idle], now: t2)
+            record("activity clock: unseen → idle keeps the turn-end stamp",
+                   seen[b]?.since == t1, "\(seen)")
+            record("activity clock: sessions no longer open are dropped",
+                   start[gone] == nil && start.count == 2)
+            let c = UUID()
+            let seeded = ActivityClock.advance(later, current: [a: .working, b: .idle, c: .idle], now: t2,
+                                               seeds: [a: Date(timeIntervalSince1970: 1), b: t2, c: t0])
+            let switched = ActivityClock.advance(later, current: [a: .needsYou], now: t2,
+                                                 seeds: [a: Date(timeIntervalSince1970: 1)])
+            let future = ActivityClock.advance([:], current: [c: .idle], now: t0, seeds: [c: t1])
+            record("activity clock: a seed starts a new stamp, an earlier seed in the same group wins, a group change ignores it, a future seed clamps",
+                   seeded[c]?.since == t0 && seeded[a]?.since == Date(timeIntervalSince1970: 1) && seeded[b]?.since == t1
+                       && switched[a]?.since == t2 && future[c]?.since == t0, "\(seeded)")
+            let base = Date(timeIntervalSince1970: 0)
+            let shown = [59, 60, 3599, 3600, 86_399, 86_400, -5].map {
+                ActivityClock.elapsed(since: base, now: base.addingTimeInterval(TimeInterval($0)))
+            }
+            record("activity clock: elapsed reads now / m / h / d",
+                   shown == ["now", "1m", "59m", "1h", "23h", "1d", "now"], "\(shown)")
+        }
+
         // --- MacroPadUnreadTracker edge detection
         do {
             let idA = UUID()

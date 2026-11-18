@@ -868,7 +868,9 @@ final class ControlSession {
                 clients: session.shim?.mirrorCount ?? 0, lastActiveAt: session.lastActiveAt.timeIntervalSince1970,
                 model: session.statusBar.model, messageCount: 0,
                 permissionMode: session.permissionMode.rawValue, accountId: session.claudeAccount?.id,
-                moveCount: session.moveCount)
+                moveCount: session.moveCount, attentionLine: session.attentionLine,
+                backgroundTasks: session.backgroundTaskCount,
+                stateSince: store.activityStamps[session.id]?.since.timeIntervalSince1970)
         }
     }
 

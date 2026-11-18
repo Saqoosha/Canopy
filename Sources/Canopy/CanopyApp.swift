@@ -167,6 +167,19 @@ struct CanopyApp: App {
                 .keyboardShortcut("]", modifiers: [.command, .shift])
                 .disabled(!sidebarStore.canCycleFocusedPaneSession)
 
+                // Sessions that need you, then ones finished and unseen.
+                Button("Jump to Next Session Needing Attention") {
+                    sidebarStore.jumpToAttentionSession(delta: +1)
+                }
+                .keyboardShortcut("j", modifiers: .command)
+                .disabled(sidebarStore.attentionSessionIds.isEmpty)
+
+                Button("Jump to Previous Session Needing Attention") {
+                    sidebarStore.jumpToAttentionSession(delta: -1)
+                }
+                .keyboardShortcut("j", modifiers: [.command, .shift])
+                .disabled(sidebarStore.attentionSessionIds.isEmpty)
+
                 Divider()
 
                 // Cmd+Ctrl+1..9 — show the N-th visible open row: load it
@@ -236,7 +249,8 @@ struct CanopyApp: App {
     /// nothing to load. So N here counts session rows, not visual positions —
     /// Cmd+1..9 is the one that counts panes.
     private var visibleOpenSessionIds: [UUID] {
-        sidebarStore.visibleRows.compactMap { row in
+        let openRows = sidebarStore.visibleRows.filter(\.isOpen)
+        return sidebarStore.openSections(openRows).flatMap(\.rows).compactMap { row in
             if case .open(let s) = row { return s.id } else { return nil }
         }
     }

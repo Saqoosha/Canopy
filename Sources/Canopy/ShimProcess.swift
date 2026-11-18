@@ -2537,6 +2537,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// When non-empty the user is being asked to approve something; the
     /// sidebar shows a "raised hand" icon while at least one is outstanding.
     private var pendingPermissionRequestIds = Set<String>()
+    /// Arrival order of `pendingPermissionRequestIds`, for the attention line; may hold resolved ids.
+    private var pendingPermissionRequestOrder: [String] = []
+    /// The question of an AskUserQuestion seen in the assistant stream before its request arrives.
+    private var streamAskLine: String?
+    /// The bound session's `attentionLine` names a request, not a turn end.
+    private var attentionLineIsRequest = false
 
     /// Each outstanding request's `inputs` payload, keyed the same as
     /// `pendingPermissionRequestIds` and cleared everywhere that set is
@@ -6587,6 +6593,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 pendingAskUserQuestionRequestIds.insert(requestId)
             }
             if isNewPermissionRequest {
+                pendingPermissionRequestOrder.append(requestId)
                 // Capped like `pending_requests`: the event outlives the request it describes.
                 let rendered = Self.renderedToolInput(request["inputs"])
                 ControlEventLog.shared.record(toolName == "AskUserQuestion" ? .asking : .permission,
@@ -6696,6 +6703,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         pendingPermissionRequestSuggestions.removeAll()
         pendingAskUserQuestionRequestIds.removeAll()
         lastAssistantHadAskUserQuestion = false
+        pendingPermissionRequestOrder.removeAll()
+        streamAskLine = nil
+        // A request line names something no longer pending; a turn-end line stays for an unseen row.
+        if attentionLineIsRequest { boundSession?.attentionLine = nil }
+        attentionLineIsRequest = false
         pendingBackgroundTaskIds.removeAll()
         bgTaskIdMap.removeAll()
         checkoutAfterRemoval = nil
@@ -6748,6 +6760,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let asking = !pendingPermissionRequestIds.isEmpty
             || lastAssistantHadAskUserQuestion
         boundSession?.isAsking = asking
+        pendingPermissionRequestOrder.removeAll { !pendingPermissionRequestIds.contains($0) }
+        let line: String?
+        if let oldest = pendingPermissionRequestOrder.first {
+            line = AttentionLine.forRequest(toolName: pendingPermissionRequestToolNames[oldest] ?? "",
+                                            inputs: pendingPermissionRequestInputs[oldest])
+        } else if lastAssistantHadAskUserQuestion {
+            line = streamAskLine ?? "AskUserQuestion"
+        } else if attentionLineIsRequest {
+            line = nil  // The request it named is answered.
+        } else {
+            return  // The turn end owns the line.
+        }
+        attentionLineIsRequest = line != nil
+        if boundSession?.attentionLine != line { boundSession?.attentionLine = line }
     }
 
     /// Recompute the waiting flag. We only flip the sidebar to "waiting" when
@@ -6763,6 +6789,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let wasWaiting = boundSession?.isWaiting == true
         let waiting = !isWorking && !pendingBackgroundTaskIds.isEmpty
         boundSession?.isWaiting = waiting
+        if boundSession?.backgroundTaskCount != pendingBackgroundTaskIds.count {
+            boundSession?.backgroundTaskCount = pendingBackgroundTaskIds.count
+        }
         syncBackgroundIdleBackstop(waiting: waiting)
         // A background task can end with no `result` after it.
         if wasWaiting, !waiting, pendingMove != nil { moveWhenQuiet() }
@@ -8076,6 +8105,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 if block["type"] as? String == "tool_use",
                    block["name"] as? String == "AskUserQuestion" {
                     found = true
+                    streamAskLine = AttentionLine.forRequest(toolName: "AskUserQuestion", inputs: block["input"])
+                    // The stream's block start already raised the flag with no question text.
+                    if lastAssistantHadAskUserQuestion { refreshAskingState() }
                     break
                 }
             }
@@ -8089,6 +8121,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 found = true
             } else if evType == "message_start" {
                 newTurnStart = true
+                streamAskLine = nil
             }
         }
         if newTurnStart && lastAssistantHadAskUserQuestion {
@@ -8178,6 +8211,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // turn must finish then too.
             let finalText = ioMsg["result"] as? String
             latestReplyText = finalText ?? ""
+            boundSession?.attentionLine = AttentionLine.forTurnEnd(finalText: finalText)
+            attentionLineIsRequest = false
             let finishedControlReply = controlTurnReplyId
             if let replyId = controlTurnReplyId {
                 controlFinishedReplyId = replyId
