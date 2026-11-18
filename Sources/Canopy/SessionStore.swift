@@ -105,9 +105,16 @@ final class SessionStore {
     /// Sole entry point for `unreadSessionIds`. Called by `MacroPadController`
     /// after `MacroPadUnreadTracker` has recomputed the set from a complete
     /// session list.
-    func setUnreadSessionIds(_ ids: Set<OpenSession.ID>) {
+    func setUnreadSessionIds(_ ids: Set<OpenSession.ID>, now: Date = Date()) {
+        let cleared = unreadSessionIds.subtracting(ids)
+        if !cleared.isEmpty { lastUnreadClear = (cleared, now) }
         unreadSessionIds = ids
     }
+
+    /// Sessions whose unread mark the last change removed, and when. Cmd+J
+    /// reads it: the keystroke itself clears the current session's mark first.
+    @ObservationIgnored private(set) var lastUnreadClear: (ids: Set<OpenSession.ID>, at: Date)?
+    static let unreadClearGrace: TimeInterval = 2
 
     /// See `ActivityClock`. Read by the sidebar rows; written only by
     /// `trackActivityClock`.
@@ -123,17 +130,18 @@ final class SessionStore {
     }
 
     private func trackActivityClock() {
-        let current = withObservationTracking {
+        let (current, seeds) = withObservationTracking {
             let unread = unreadSessionIds
-            return Dictionary(openSessions.map {
+            let groups = Dictionary(openSessions.map {
                 ($0.id, SidebarStatusGroup.of(SessionActivity.of($0, isUnread: unread.contains($0.id))))
             }, uniquingKeysWith: { first, _ in first })
+            let seeds = Dictionary(openSessions.compactMap { s in s.daemonActivitySince.map { (s.id, $0) } },
+                                   uniquingKeysWith: { first, _ in first })
+            return (groups, seeds)
         } onChange: { [weak self] in
             // Fires before the mutation lands; re-read on the next turn.
             Task { @MainActor [weak self] in self?.trackActivityClock() }
         }
-        let seeds = Dictionary(openSessions.compactMap { s in s.daemonActivitySince.map { (s.id, $0) } },
-                               uniquingKeysWith: { first, _ in first })
         let next = ActivityClock.advance(activityStamps, current: current, now: Date(), seeds: seeds)
         if next != activityStamps { activityStamps = next }
     }
@@ -1866,7 +1874,7 @@ final class SessionStore {
             // Every push repeats the reaped rows; an assignment wakes observers even when equal.
             let settled = session.status == .dormant && session.daemonKey == nil && session.resumeIdIsExistingTranscript
                 && session.resumeId == update.row.resumeId && !session.isThinking && !session.isAsking && !session.isWaiting
-                && session.backgroundTaskCount == 0 && session.attentionLine == nil
+                && session.backgroundTaskCount == 0 && session.attentionLine == nil && session.daemonActivitySince == nil
             guard !settled else { continue }
             if session.status != .dormant { detachDaemonSession(session) }
             session.daemonKey = nil
@@ -1877,6 +1885,7 @@ final class SessionStore {
             session.isWaiting = false
             session.backgroundTaskCount = 0
             session.attentionLine = nil
+            session.daemonActivitySince = nil
         }
         for row in plan.stoppedAdds where !row.cwd.isEmpty && !openSessions.contains(where: { $0.resumeId == row.resumeId }) {
             addDormant(row, key: nil)
@@ -3263,8 +3272,7 @@ final class SessionStore {
     /// thing whether or not the sidebar shows the Status sections.
     var attentionSessionIds: [UUID] { attentionSessionIds(keeping: nil) }
 
-    /// `keeping` is ranked as if still unread: the Cmd+J keystroke itself
-    /// clears the current session's unread mark before the jump runs.
+    /// `keeping` is ranked as if still unread: see `lastUnreadClear`.
     func attentionSessionIds(keeping kept: UUID?) -> [UUID] {
         let unread = kept.map { unreadSessionIds.union([$0]) } ?? unreadSessionIds
         return SidebarStatusGroup.sections(visibleRows.filter(\.isOpen)) { unread.contains($0) }
@@ -3294,7 +3302,10 @@ final class SessionStore {
             if case .session(let id) = focusedPane?.content { return id }
             return nil
         }()
-        guard let target = Self.nextAttentionTarget(attentionSessionIds(keeping: current), current: current, delta: delta),
+        let justCleared = current.flatMap { id in
+            lastUnreadClear.flatMap { $0.ids.contains(id) && Date().timeIntervalSince($0.at) < Self.unreadClearGrace ? id : nil }
+        }
+        guard let target = Self.nextAttentionTarget(attentionSessionIds(keeping: justCleared), current: current, delta: delta),
               target != current else { return }
         openInFocusedPane(target)
     }

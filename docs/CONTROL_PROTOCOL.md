@@ -79,7 +79,7 @@ An open row, here and in `session_state`, may also carry:
 |---|---|
 | `attentionLine` | One line naming the oldest pending permission request or question (the first question, Bash's description or command, a file tool's file name, or the tool name), else the first line of the last turn's final message; cut at 120 characters. Absent while there is none |
 | `backgroundTasks` | Running background Bash/Agent tasks. Absent while 0 |
-| `stateSince` | Unix seconds when the session entered its current status group (Needs you / Done · unseen / Working / Idle) |
+| `stateSince` | Unix seconds when the session entered its current status group: Needs you, Working, or Idle (which includes Done · unseen) |
 
 `scope: "recent"` lists past sessions, most recently active first. These are
 the rows `open_session`'s `resumeSessionId` continues. Without filters it

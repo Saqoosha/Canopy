@@ -69,20 +69,27 @@ enum ActivityClock {
         let since: Date
     }
 
-    /// Sessions absent from `current` are dropped. A session with no stamp
-    /// yet starts at its seed (the daemon's stamp, so a GUI relaunch keeps
-    /// the time), else now; a group change always starts now.
+    /// Sessions absent from `current` are dropped. A group change starts the
+    /// clock now; otherwise an earlier seed (the daemon's stamp, so a GUI
+    /// relaunch keeps the time) wins. Unseen counts as idle here: both run
+    /// from the turn end, and the daemon has no unread set.
     static func advance(_ previous: [OpenSession.ID: Stamp],
                         current: [OpenSession.ID: SidebarStatusGroup],
                         now: Date,
                         seeds: [OpenSession.ID: Date] = [:]) -> [OpenSession.ID: Stamp] {
         current.reduce(into: [:]) { out, entry in
-            if let old = previous[entry.key] {
-                out[entry.key] = old.group == entry.value ? old : Stamp(group: entry.value, since: now)
+            let group = clockGroup(entry.value)
+            let seed = min(seeds[entry.key] ?? now, now)
+            if let old = previous[entry.key], old.group == group {
+                out[entry.key] = Stamp(group: group, since: min(old.since, seed))
             } else {
-                out[entry.key] = Stamp(group: entry.value, since: min(seeds[entry.key] ?? now, now))
+                out[entry.key] = Stamp(group: group, since: previous[entry.key] == nil ? seed : now)
             }
         }
+    }
+
+    static func clockGroup(_ group: SidebarStatusGroup) -> SidebarStatusGroup {
+        group == .unseen ? .idle : group
     }
 
     /// "now" under a minute, then whole minutes, hours, days.

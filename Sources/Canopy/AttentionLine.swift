@@ -17,16 +17,15 @@ enum AttentionLine {
         let dict = inputs as? [String: Any] ?? [:]
         if toolName == "AskUserQuestion",
            let questions = dict["questions"] as? [[String: Any]],
-           let question = questions.first?["question"] as? String,
-           let line = firstLine(question) {
-            return line
+           let question = (questions.first?["question"] as? String).flatMap(uncappedFirstLine) {
+            return question
         }
         if toolName == "Bash" {
-            if let description = dict["description"] as? String, let line = firstLine(description) {
-                return "Bash: \(line)"
+            if let description = (dict["description"] as? String).flatMap(uncappedFirstLine) {
+                return "Bash: \(description)"
             }
-            if let command = dict["command"] as? String, let line = firstLine(command) {
-                return "Bash: \(line)"
+            if let command = (dict["command"] as? String).flatMap(uncappedFirstLine) {
+                return "Bash: \(command)"
             }
         }
         if let path = (dict["file_path"] ?? dict["notebook_path"]) as? String, !path.isEmpty {
@@ -35,28 +34,41 @@ enum AttentionLine {
         return toolName.isEmpty ? nil : toolName
     }
 
-    /// A finished turn: the first line of the model's last message that is
-    /// not blank or a code fence, with a leading heading, list or quote
-    /// marker and every `**` removed.
+    /// A finished turn: the first line of the model's last message outside a
+    /// code block that still has text once its leading heading, list, task or
+    /// quote markers and every `**` are removed.
     static func forTurnEnd(finalText: String?) -> String? {
         guard let finalText else { return nil }
-        return finalText.split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.hasPrefix("```") }
-            .lazy
-            .compactMap { line in
-                firstLine(line.replacingOccurrences(of: "**", with: "")
-                    .replacingOccurrences(of: #"^(#{1,6}|>|[-*+]|\d+\.)(\s+|$)"#, with: "", options: .regularExpression)
-                    .replacingOccurrences(of: #"^[-*_]{3,}$"#, with: "", options: .regularExpression))
-            }
-            .first
+        var inFence = false
+        for raw in finalText.split(whereSeparator: \.isNewline) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("```") { inFence.toggle(); continue }
+            guard !inFence, let text = firstLine(unmarked(line)) else { continue }
+            return text
+        }
+        return nil
+    }
+
+    private static func unmarked(_ line: String) -> String {
+        var out = line.replacingOccurrences(of: "**", with: "")
+        while true {
+            let next = out
+                .replacingOccurrences(of: #"^(#{1,6}|>|[-*+]|\d+\.|\[[ xX]\])(\s+|$)"#, with: "", options: .regularExpression)
+                .replacingOccurrences(of: #"^[-*_]{3,}$"#, with: "", options: .regularExpression)
+            if next == out { return out }
+            out = next
+        }
     }
 
     /// First non-blank line, trimmed and cut to `maxCharacters`.
     static func firstLine(_ text: String) -> String? {
-        guard let line = text.split(whereSeparator: \.isNewline)
-            .map({ $0.trimmingCharacters(in: .whitespaces) })
-            .first(where: { !$0.isEmpty }) else { return nil }
+        guard let line = uncappedFirstLine(text) else { return nil }
         return line.count > maxCharacters ? String(line.prefix(maxCharacters - 1)) + "…" : line
+    }
+
+    private static func uncappedFirstLine(_ text: String) -> String? {
+        text.split(whereSeparator: \.isNewline).lazy
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty }
     }
 }

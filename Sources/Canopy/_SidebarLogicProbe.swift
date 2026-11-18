@@ -10097,10 +10097,12 @@ enum SidebarLogicProbe {
             record("attention line: a turn end keeps a leading mark not followed by a space",
                    kept == ["-5 tests failing", "#428 merged", "--force push?"], "\(kept)")
             let fenced = AttentionLine.forTurnEnd(finalText: "```bash\nnpm test\n```\nAll green")
-            let listed = AttentionLine.forTurnEnd(finalText: "1. Fixed X")
-            record("attention line: a turn end skips fence lines and strips a numbered-list marker",
-                   fenced == "npm test" && listed == "Fixed X",
-                   "\(String(describing: fenced)) / \(String(describing: listed))")
+            let listed = [AttentionLine.forTurnEnd(finalText: "1. Fixed X"),
+                          AttentionLine.forTurnEnd(finalText: "> - Note"),
+                          AttentionLine.forTurnEnd(finalText: "- [ ] Fix X")]
+            record("attention line: a turn end skips code blocks and strips nested list, task and quote markers",
+                   fenced == "All green" && listed == ["Fixed X", "Note", "Fix X"],
+                   "\(String(describing: fenced)) / \(listed)")
             let n = AttentionLine.maxCharacters
             let exact = AttentionLine.firstLine(String(repeating: "y", count: n))
             let over = AttentionLine.firstLine(String(repeating: "y", count: n + 1))
@@ -10129,10 +10131,25 @@ enum SidebarLogicProbe {
             jumpStore.setUnreadSessionIds([jc.id])
             record("attention jump: targets are needs-you then unseen; idle rows are out",
                    jumpStore.attentionSessionIds == [ja.id, jc.id], "\(jumpStore.attentionSessionIds)")
-            record("attention jump: the current session keeps its unseen rank after the keystroke cleared it",
-                   jumpStore.attentionSessionIds(keeping: jb.id) == [ja.id, jb.id, jc.id]
-                       && SessionStore.nextAttentionTarget(jumpStore.attentionSessionIds(keeping: jb.id),
-                                                           current: jb.id, delta: 1) == jc.id)
+            func focusedJumpSession(_ store: SessionStore) -> UUID? {
+                if case .session(let id) = store.focusedPane?.content { return id }
+                return nil
+            }
+            // jb was unseen; the Cmd+J keystroke clears it just before the jump.
+            jumpStore.setUnreadSessionIds([jb.id, jc.id])
+            jumpStore.openInFocusedPane(jb.id)
+            jumpStore.setUnreadSessionIds([jc.id])
+            jumpStore.jumpToAttentionSession(delta: 1)
+            record("attention jump: a session whose unread mark the keystroke just cleared keeps its rank",
+                   focusedJumpSession(jumpStore) == jc.id, "\(String(describing: focusedJumpSession(jumpStore)))")
+            // jd was never unread: it is not a target, so Cmd+J starts at the first one.
+            let neverStore = SessionStore()
+            neverStore._probeSeedOpenSessions([ja, jd, jc])
+            neverStore.setUnreadSessionIds([jc.id])
+            neverStore.openInFocusedPane(jd.id)
+            neverStore.jumpToAttentionSession(delta: 1)
+            record("attention jump: an idle session that was never unread does not join the cycle",
+                   focusedJumpSession(neverStore) == ja.id, "\(String(describing: focusedJumpSession(neverStore)))")
 
             // The daemon's half: list_sessions / session_state rows carry the three fields.
             let wireStore = SessionStore()
@@ -10188,15 +10205,22 @@ enum SidebarLogicProbe {
                                               current: [a: .working, b: .working], now: t0)
             let later = ActivityClock.advance(start, current: [a: .working, b: .unseen], now: t1)
             record("activity clock: same group keeps its stamp, a new group restamps",
-                   later[a]?.since == t0 && later[b] == .init(group: .unseen, since: t1), "\(later)")
+                   later[a]?.since == t0 && later[b] == .init(group: .idle, since: t1), "\(later)")
+            let t2 = Date(timeIntervalSince1970: 3_000)
+            let seen = ActivityClock.advance(later, current: [a: .working, b: .idle], now: t2)
+            record("activity clock: unseen → idle keeps the turn-end stamp",
+                   seen[b]?.since == t1, "\(seen)")
             record("activity clock: sessions no longer open are dropped",
                    start[gone] == nil && start.count == 2)
             let c = UUID()
-            let seeded = ActivityClock.advance(later, current: [a: .working, c: .idle], now: t1,
-                                               seeds: [a: Date(timeIntervalSince1970: 1), c: t0])
+            let seeded = ActivityClock.advance(later, current: [a: .working, b: .idle, c: .idle], now: t2,
+                                               seeds: [a: Date(timeIntervalSince1970: 1), b: t2, c: t0])
+            let switched = ActivityClock.advance(later, current: [a: .needsYou], now: t2,
+                                                 seeds: [a: Date(timeIntervalSince1970: 1)])
             let future = ActivityClock.advance([:], current: [c: .idle], now: t0, seeds: [c: t1])
-            record("activity clock: a seed starts a new session's stamp, an existing stamp ignores it, a future seed clamps to now",
-                   seeded[c]?.since == t0 && seeded[a]?.since == t0 && future[c]?.since == t0, "\(seeded)")
+            record("activity clock: a seed starts a new stamp, an earlier seed in the same group wins, a group change ignores it, a future seed clamps",
+                   seeded[c]?.since == t0 && seeded[a]?.since == Date(timeIntervalSince1970: 1) && seeded[b]?.since == t1
+                       && switched[a]?.since == t2 && future[c]?.since == t0, "\(seeded)")
             let base = Date(timeIntervalSince1970: 0)
             let shown = [59, 60, 3599, 3600, 86_399, 86_400, -5].map {
                 ActivityClock.elapsed(since: base, now: base.addingTimeInterval(TimeInterval($0)))
