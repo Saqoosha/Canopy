@@ -79,21 +79,19 @@ final class DisplayDarkMonitor {
         if !asleep { poll() }
     }
 
-    /// Skipped while the screens sleep: the verdict is already dark, and DDC
-    /// traffic can wake a monitor in standby.
     private func poll() {
-        guard timer != nil, !screensAsleep else { return }
+        guard timer != nil else { return }
         guard !pollInFlight else { pollAgain = true; return }
         pollInFlight = true
         pollQueue.async { [weak self] in
             let builtIn = Self.builtInDisplayActive()
             let external = Self.readExternalBrightness()
             Task { @MainActor in
-                // nil: the registry query itself failed, so this poll says nothing.
                 guard let self else { return }
                 self.pollInFlight = false
                 // A poll that a wake overtook read the sleeping state; read again.
                 if self.pollAgain { self.pollAgain = false; self.poll(); return }
+                // `external` is nil when the registry query failed: no verdict.
                 guard self.timer != nil, !self.screensAsleep, let external else { return }
                 self.update(builtInActive: builtIn, externalBrightness: external)
             }
@@ -154,9 +152,10 @@ final class DisplayDarkMonitor {
             defer { IOObjectRelease(service) }
             let location = IORegistryEntryCreateCFProperty(service, "Location" as CFString, kCFAllocatorDefault, 0)?
                 .takeRetainedValue() as? String
-            guard location == "External" else { continue }
-            result.append(IOAVServiceCreateWithService(kCFAllocatorDefault, service)
-                .flatMap { readBrightness($0.takeRetainedValue()) })
+            guard location == "External",
+                  let av = IOAVServiceCreateWithService(kCFAllocatorDefault, service)?.takeRetainedValue()
+            else { continue }
+            result.append(readBrightness(av))
         }
         return result
     }

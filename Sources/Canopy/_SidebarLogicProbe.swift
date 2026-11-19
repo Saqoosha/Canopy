@@ -11327,13 +11327,13 @@ enum SidebarLogicProbe {
                 record("display dark: no AV service after one was seen is dark (monitor off)",
                        e(false, [], true, false))
                 record("display dark: no AV service ever seen keeps the previous verdict (Intel, DisplayLink)",
-                       !e(false, [], false, false))
+                       !e(false, [], false, false) && e(false, [], false, true))
                 record("display dark: every external at brightness 0 is dark",
                        e(false, [0, 0], true, false))
                 record("display dark: one lit external keeps the pad lit",
                        !e(false, [0, 40, nil], true, true))
                 record("display dark: an unknown read keeps the previous verdict",
-                       e(false, [nil], true, true))
+                       e(false, [nil], true, true) && e(false, [0, nil], true, true))
                 record("display dark: an unknown read keeps a lit verdict lit",
                        !e(false, [nil], true, false) && !e(false, [0, nil], true, false))
             }
