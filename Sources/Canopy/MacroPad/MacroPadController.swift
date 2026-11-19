@@ -614,11 +614,17 @@ final class MacroPadController {
     /// silently swallow one.
     private var lastSentCommands: [Int: MacroPadCommand] = [:]
     private var lastBrightness: Int?
-    /// Manual sleep: the pad dark on a deliberate gesture, because macOS
-    /// offers no signal for "the display at that desk was switched off at its
-    /// own power button" — see issue #147 for the alternatives that were
-    /// measured and rejected.
+    /// Manual sleep: the pad dark on a deliberate gesture (issue #147).
+    /// Following the display automatically is `displayMonitor`'s job.
     private var isAsleep = UserDefaults.standard.bool(forKey: MacroPadController.asleepDefaultsKey)
+    /// Dark because this Mac's screens are: off, asleep, or at brightness 0.
+    /// Unlike `isAsleep` it is not persisted and not woken by a key press;
+    /// it follows the display. Ignored when `macroPadSleepWithDisplay` is off
+    /// and for a remote pad, which sits at another Mac's desk.
+    private lazy var displayMonitor = DisplayDarkMonitor { [weak self] in
+        guard let self else { return }
+        self.applyBrightness(self.settings.macroPadBrightness, animated: true)
+    }
     private var chord = MacroPadSleepChord()
     private var chordTimer: Timer?
     /// The deadline `chordTimer` is aimed at. Kept beside it so a key event
@@ -820,6 +826,8 @@ final class MacroPadController {
     func shutdown() {
         watchdogTimer?.invalidate()
         watchdogTimer = nil
+        cancelFade()
+        displayMonitor.setEnabled(false)
         cancelSleepChord()
         activationObservers.forEach(NotificationCenter.default.removeObserver)
         activationObservers.removeAll()
@@ -867,6 +875,7 @@ final class MacroPadController {
         // `track()`'s `onChange`) and relights the pad — the same mechanism
         // `macroPadSource` relies on.
         let reversed = settings.macroPadReversed
+        let sleepWithDisplay = settings.macroPadSleepWithDisplay
         let panes = store.panes
         let openSessions = store.openSessions
 
@@ -1014,6 +1023,7 @@ final class MacroPadController {
             return SessionActivity.of(session, isUnread: unread.contains(id))
         }
 
+        displayMonitor.setEnabled(sleepWithDisplay && isConnected && source == .local)
         applyBrightness(brightness)
         pushStates()
         publishStatus()
@@ -1335,12 +1345,68 @@ final class MacroPadController {
     /// Waking sends whatever the slider says *now* — not the `B <previous>`
     /// the issue proposed — because the live setting is read on every
     /// `refresh()` and never snapshotted.
-    private func applyBrightness(_ percent: Int) {
-        guard isConnected else { return }
-        let clamped = Self.effectiveBrightness(percent: percent, isAsleep: isAsleep)
+    ///
+    /// `animated` fades to the new level over `fadeDuration` instead of
+    /// jumping — used when sleep or the display turns the pad off or on. The
+    /// firmware applies `B` at once and takes integers only, so the fade is a
+    /// series of `B` commands from here. Any call aimed at the fade's own
+    /// target leaves it running (`refresh()` calls this on every pass); a
+    /// call aimed elsewhere cancels it.
+    private func applyBrightness(_ percent: Int, animated: Bool = false) {
+        guard isConnected else { cancelFade(); return }
+        // `refresh()` enables the monitor only for a connected local pad with
+        // the setting on, and `isDark` is false while it is disabled.
+        let clamped = Self.effectiveBrightness(percent: percent, isAsleep: isAsleep || displayMonitor.isDark)
+        if fade?.target == clamped { return }
+        cancelFade()
         guard lastBrightness != clamped else { return }
-        lastBrightness = clamped
-        device.send(.brightness(percent: clamped))
+        guard animated, let from = lastBrightness else {
+            sendBrightness(clamped)
+            return
+        }
+        let timer = Timer.scheduledTimer(withTimeInterval: Self.fadeStep, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.fadeTick() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        fade = Fade(from: from, target: clamped, start: ProcessInfo.processInfo.systemUptime, timer: timer)
+    }
+
+    private static let fadeDuration: TimeInterval = 0.5
+    private static let fadeStep: TimeInterval = 0.04
+    private struct Fade {
+        let from: Int
+        let target: Int
+        let start: TimeInterval
+        let timer: Timer
+    }
+    private var fade: Fade?
+
+    private func fadeTick() {
+        guard let fade, isConnected else { cancelFade(); return }
+        let progress = (ProcessInfo.processInfo.systemUptime - fade.start) / Self.fadeDuration
+        let level = Self.fadeLevel(from: fade.from, to: fade.target, progress: progress)
+        if lastBrightness != level { sendBrightness(level) }
+        if progress >= 1 { cancelFade() }
+    }
+
+    private func cancelFade() {
+        fade?.timer.invalidate()
+        fade = nil
+    }
+
+    private func sendBrightness(_ level: Int) {
+        lastBrightness = level
+        device.send(.brightness(percent: level))
+    }
+
+    /// The level at `progress` (0…1, clamped) of a fade, interpolated on the
+    /// square root of the level so the steps look even: the eye sees 1→2 as a
+    /// far bigger change than 29→30. Pure for the probe.
+    static func fadeLevel(from: Int, to: Int, progress: Double) -> Int {
+        let t = min(1, max(0, progress))
+        let from = max(0, from), to = max(0, to)
+        let root = Double(from).squareRoot() + (Double(to).squareRoot() - Double(from).squareRoot()) * t
+        return Int((root * root).rounded())
     }
 
     /// `B 0` and back, and deliberately nothing else.
@@ -1367,7 +1433,7 @@ final class MacroPadController {
         isAsleep = asleep
         UserDefaults.standard.set(asleep, forKey: Self.asleepDefaultsKey)
         logger.notice("MacroPad manual sleep: \(asleep ? "asleep" : "awake", privacy: .public)")
-        applyBrightness(settings.macroPadBrightness)
+        applyBrightness(settings.macroPadBrightness, animated: true)
     }
 
     /// Re-sends everything from a known-nothing state. Used on connect and on
@@ -1454,6 +1520,8 @@ final class MacroPadController {
             portBusyPath = busyPath
             publishStatus()
         case .disconnected:
+            displayMonitor.setEnabled(false)
+            cancelFade()
             // The `didSet` clears `portBusyPath` here: a disconnect says
             // nothing about who holds the port NOW, and the pass that follows
             // is what answers. Keeping a stale path would let the indicator

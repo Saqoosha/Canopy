@@ -132,6 +132,11 @@ final class CanopySettings {
     var macroPadReversed: Bool = false {
         didSet { save() }
     }
+    /// Dark pad while this Mac's screens are dark (`DisplayDarkMonitor`).
+    /// Local pads only.
+    var macroPadSleepWithDisplay: Bool = true {
+        didSet { save() }
+    }
     /// Global LED brightness 0–100. The firmware multiplies this into every
     /// channel, so colors are sent full-scale and this is the only dimming
     /// knob — pre-dimming a color would dim it twice.
@@ -312,6 +317,11 @@ final class CanopySettings {
             // the default, so without this the edit vanishes with no trail.
             logger.notice("MacroPad: canopy.macroPadReversed is not a boolean; ignoring it and keeping \(self.macroPadReversed, privacy: .public)")
         }
+        if let sleepWithDisplay = dict["canopy.macroPadSleepWithDisplay"] as? Bool {
+            macroPadSleepWithDisplay = sleepWithDisplay
+        } else if dict["canopy.macroPadSleepWithDisplay"] != nil {
+            logger.notice("MacroPad: canopy.macroPadSleepWithDisplay is not a boolean; ignoring it and keeping \(self.macroPadSleepWithDisplay, privacy: .public)")
+        }
         if let brightness = dict["canopy.macroPadBrightness"] as? Int { macroPadBrightness = min(100, max(0, brightness)) }
         if let raw = dict["canopy.defaultPermissionMode"] as? String,
            let mode = PermissionMode(rawValue: raw)
@@ -389,6 +399,7 @@ final class CanopySettings {
         // rather than a stale boolean fighting the selector.
         dict["canopy.macroPadEnabled"] = nil
         dict["canopy.macroPadReversed"] = macroPadReversed
+        dict["canopy.macroPadSleepWithDisplay"] = macroPadSleepWithDisplay
         dict["canopy.macroPadBrightness"] = macroPadBrightness
         dict["canopy.defaultPermissionMode"] = defaultPermissionMode.rawValue
         dict["canopy.machineDisplayName"] = machineDisplayName
