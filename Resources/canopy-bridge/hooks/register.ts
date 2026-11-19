@@ -337,6 +337,48 @@ const DEPLOY_WORD = /\b(deploy|publish|release|apply|push|upload)\b/i
 // Leading words that only wrap the command (`for …; do cf deploy; done`).
 const WRAPPERS = new Set(['do', 'then', 'else', 'elif', 'time', '!', '{'])
 
+const SHELL_OPS = ['$(', '&&', '||', '`', '(', ')', ';', '|', '&', '\n']
+
+// A Bash line cut into simple commands. Operators inside quotes, after a backslash or in a
+// comment do not cut: `echo "a; cf deploy"` is one echo. A substitution (`$(…)`, backticks,
+// `(…)`) is read as its own commands, and the command around it continues after it, marked
+// `substituted` when the shell fills it in at run time.
+function splitShell(line) {
+  const out = []
+  const stack = []
+  let quote = null
+  let cur = ''
+  let substituted = false
+  const cut = () => { out.push({ text: cur, substituted }); cur = ''; substituted = false }
+  for (let i = 0; i < line.length;) {
+    const c = line[i]
+    if (quote === "'") { if (c === "'") quote = null; cur += c; i++; continue }
+    if (c === '\\') { cur += line.slice(i, i + 2); i += 2; continue }
+    if (quote === '"' && c === '"') { quote = null; cur += c; i++; continue }
+    if (quote === '"' && !line.startsWith('$(', i) && c !== '`') { cur += c; i++; continue }
+    if (quote === null && (c === "'" || c === '"')) { quote = c; cur += c; i++; continue }
+    if (quote === null && c === '#' && /(^|\s)$/.test(cur)) { while (i < line.length && line[i] !== '\n') i++; continue }
+    const op = SHELL_OPS.find(o => line.startsWith(o, i))
+    i += op ? op.length : 1
+    if (!op) { cur += c; continue }
+    const top = stack.at(-1)
+    if ((op === ')' && top?.closes === ')') || (op === '`' && top?.closes === '`')) {
+      cut()
+      const outer = stack.pop()
+      quote = outer.quote
+      cur = `${outer.cur} $SUB `
+      substituted = outer.substituted || outer.fills
+    } else if (op === '$(' || op === '(' || op === '`') {
+      stack.push({ quote, cur, substituted, closes: op === '`' ? '`' : ')', fills: op !== '(' })
+      quote = null
+      cur = ''
+      substituted = false
+    } else cut()
+  }
+  cut()
+  return out
+}
+
 // The simple commands of a Bash line: split at operators and command substitutions, with
 // redirections and wrapper words dropped, each with the folder a `cd` earlier in the line
 // moved to. `out=$(cd cms && cf deploy 2>&1)` holds `cf deploy` in `cms`. Leading `VAR=`
@@ -344,10 +386,8 @@ const WRAPPERS = new Set(['do', 'then', 'else', 'elif', 'time', '!', '{'])
 function simpleCommands(command) {
   const commands = []
   let dir = []
-  const cleaned = String(command).replace(/\d*[<>]&\d+/g, ' ').replace(/&>/g, ' > ')
-  const parts = cleaned.split(/(\$\(|`|\(|\)|&&|\|\||[;|&\n])/)
-  for (let i = 0; i < parts.length; i += 2) {
-    const segment = parts[i]
+  const parts = splitShell(String(command).replace(/\d*[<>]&\d+/g, ' ').replace(/&>/g, ' > '))
+  for (const { text: segment, substituted } of parts) {
     const words = []
     let skipNext = false
     for (const raw of segment.trim().split(/\s+/)) {
@@ -368,8 +408,6 @@ function simpleCommands(command) {
         else if (part && part !== '.') dir = [...dir, part]
       }
     }
-    // `cf deploy $(echo --env prod)`: a substitution opened inside the command's own words.
-    const substituted = parts[i + 1] === '$(' || parts[i + 1] === '`'
     commands.push({ words, dir: dir.join('/') || '.', substituted })
   }
   return commands
@@ -408,8 +446,8 @@ async function learnDeploys($, found) {
   if (found.length === 0) return
   try {
     const known = await readDeploys($)
-    const next = [...known, ...found.filter(c => !known.includes(c))].slice(-20)
-    if (next.length !== known.length) await $.store.set(await deploysKey($), next)
+    const added = [...new Set(found)].filter(c => !known.includes(c))
+    if (added.length) await $.store.set(await deploysKey($), [...known, ...added].slice(-20))
   } catch (err) {
     slackLog($, { failed: `deploys write: ${String(err)}` })
   }

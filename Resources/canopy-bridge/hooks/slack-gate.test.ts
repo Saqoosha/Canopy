@@ -663,3 +663,23 @@ test('the command is registered when the session starts', async ($, on) => {
   await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
   expect(registered).toContain('slack-allow')
 })
+
+test('quoted text, escapes and comments are not commands: they are not learned as deploys', async ($, on) => {
+  const { store } = engine(on)
+  await $.prompt.submit({ text: 'go', origin: typed })
+  for (const command of [
+    'echo "ready; cf deploy --env production"', "echo 'x && wrangler deploy'", 'echo a \\; fly deploy', 'ls # then: firebase deploy', 'echo "$(date); vercel deploy --prod"',
+  ]) await $.tool.call({ tool: 'Bash', command })
+  expect((store.get('slack-deploys:sid') ?? []).filter(c => !c.includes('echo'))).toEqual([])
+  await $.tool.call({ tool: 'Bash', command: 'out="$(cd cms && cf deploy 2>&1)"; echo "$out" | tail -2' })
+  expect(store.get('slack-deploys:sid')).toContain('cms\tcf deploy')
+})
+
+test('the learned deploys keep growing past twenty, keeping the newest', async ($, on) => {
+  const { store } = engine(on)
+  await $.prompt.submit({ text: 'go', origin: typed })
+  for (let i = 0; i < 22; i++) await $.tool.call({ tool: 'Bash', command: `cf deploy --name site${i}` })
+  const learned = store.get('slack-deploys:sid')
+  expect(learned.length).toBe(20)
+  expect(learned.at(-1)).toBe('.\tcf deploy --name site21')
+})
