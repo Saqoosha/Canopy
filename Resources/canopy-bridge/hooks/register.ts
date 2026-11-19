@@ -47,6 +47,10 @@ let slackGrant
 // The turn running now was started by a person-origin prompt with no Slack text in it: only
 // those turns' deploys are learned.
 let ownerTurn = false
+// A Slack reply that ran read-only is in the model's context: no later reply may be granted
+// until Saqoosha lifts the gate. Its own flag, so a grant dropped by a keep-alive or a
+// notification does not hold the next allowed reply.
+let readOnlyHeld = false
 
 const isId = (v, re) => typeof v === 'string' && re.test(v)
 
@@ -71,13 +75,17 @@ async function grantKey($) {
 
 async function restoreSlackGate($) {
   try {
-    if (await $.store.get(await slackKey($))) {
+    const saved = await $.store.get(await slackKey($))
+    if (saved) {
       slackQuestion = true
-      slackGrant = savedGrant(await $.store.get(await grantKey($)))
+      // Anything but the plain `true` this module writes counts as held: the safe reading.
+      readOnlyHeld = saved !== true
+      slackGrant = readOnlyHeld ? undefined : savedGrant(await $.store.get(await grantKey($)))
     }
   } catch (err) {
     slackQuestion = true
     slackGrant = undefined
+    readOnlyHeld = true
     slackLog($, { failed: `read: ${String(err)}` })
   }
 }
@@ -91,7 +99,7 @@ async function saveSlackGate($) {
   }
   try {
     const key = await slackKey($)
-    await (slackQuestion === undefined ? $.store.delete(key) : $.store.set(key, true))
+    await (slackQuestion === undefined ? $.store.delete(key) : $.store.set(key, readOnlyHeld ? 'held' : true))
   } catch (err) {
     slackLog($, { failed: `write: ${String(err)}` })
   }
@@ -262,14 +270,19 @@ async function runGrantCommand($, args) {
   const rest = off ? words.slice(1) : words
   const deploy = !off && rest.length > 1 && rest.at(-1) === 'deploy'
   const who = (deploy ? rest.slice(0, -1) : rest).join(' ')
-  if (words.length === 0 || deploy) await learnDeploys($, await deploysInHistory($))
-  const deploys = await readDeploys($)
+  const before = (await readCommands($)).length
+  if (!off && who) await learnFromHistory($)
+  const commands = await readCommands($)
+  const deploys = commands.filter(c => DEPLOY_WORD.test(c))
+  const fromHistory = commands.length - before
   const list = () => {
     const rows = Object.entries(grants).map(([id, g]) => `- ${g.name} (${id}): edits${g.deploy ? ', deploy' : ''}`)
     const known = deploys.length
-      ? `Deploys this session has run, which “deploy” allows: ${deploys.map(showDeploy).join(', ')}`
+      ? `Deploys this session has run, which “deploy” allows: ${deploys.map(showCommand).join(', ')}`
       : 'This session has run no deploy yet, so “deploy” allows none until one runs in your turn.'
-    return rows.length ? `Allowed in this session:\n${rows.join('\n')}\n${known}` : 'Nobody from Slack is allowed in this session.'
+    const learned = `A member's Bash runs only the ${commands.length} commands this session has run in your turns`
+      + (fromHistory > 0 ? ` (${fromHistory} just read from the conversation so far).` : '.')
+    return rows.length ? `Allowed in this session:\n${rows.join('\n')}\n${learned}\n${known}` : 'Nobody from Slack is allowed in this session.'
   }
   if (words.length === 0) return list()
   if (off && !who) {
@@ -319,11 +332,8 @@ const PROTECTED = new RegExp('(^|/)(' + [
   '\\.claude', '\\.git', '\\.husky', '\\.github', '\\.vscode', 'CLAUDE\\.md', 'AGENTS\\.md', '\\.mcp\\.json', '\\.envrc',
   'lefthook\\.ya?ml', 'package\\.json', 'Makefile', 'justfile', 'wrangler\\.[^/]*', 'cloudflare\\.config\\.[^/]*', '[^/]*\\.sh',
 ].join('|') + ')(/|$)')
-// The same files, named in a Bash command. `.git` alone is too common a word in commands.
-const PROTECTED_IN_BASH = /(^|\/)(\.claude|\.git\/|\.husky|CLAUDE\.md|AGENTS\.md|\.mcp\.json|\.envrc|lefthook\.ya?ml)/
-
-// Commands an allowed member's reply may not run (`bashDenial`). `git`'s check reads the
-// whole line, so `bash -c 'git push'` is caught as well.
+// Commands Saqoosha keeps for himself: refused for a member even when his own turn ran them.
+// Each reads the whole line, so `bash -c 'git push'` is caught as well.
 const BASH_DENIED = [
   [/\b(git|jj)\b[^\n;&|]*\b(push|commit|describe|tag|remote|config|worktree)\b/, 'committing, pushing and worktrees stay with Saqoosha'],
   [/\b(op|security|printenv|ssh|scp|sftp|rsync|nc|ncat|telnet|osascript|pbcopy|pbpaste|gh|canopyctl|sudo)\b/, 'that command reaches credentials, other machines or other sessions'],
@@ -331,17 +341,13 @@ const BASH_DENIED = [
   [/\$\{?HOME\b/, 'paths outside the session folder are not available'],
   [REMOVES, 'deleting folders stays with Saqoosha'],
 ]
-// A simple command that starts with one of these prints or changes the environment a later
-// command (a deploy) reads.
-const ENV_COMMANDS = new Set(['env', 'export', 'set', 'unset', 'declare', 'typeset', 'source', '.', 'alias', 'compgen'])
-const FETCHERS = /^(curl|wget|http|https|xh)$/
-const LOCAL_HOST = /^(localhost|127\.0\.0\.1|\[::1\])$/
-
-// --- Deploys this session has run for Saqoosha ---
+// --- Commands this session has run for Saqoosha ---
 //
-// Saqoosha does not know each project's deploy command, so `deploy` in a grant means "the
-// deploys already run in this session in his turns". A member's command with a deploy-like
-// word runs only when it is one of those; any other is refused, `deploy` or not.
+// A member's Bash runs only commands Saqoosha's own turns already ran here: each simple
+// command, in the folder it ran in, word for word. Saqoosha does not know each project's
+// build and deploy commands, so the session learns them from what he had run. A deploy-like
+// one also needs `deploy` in the grant. A pattern list could not contain Bash; this does,
+// at the cost of refusing a command written slightly differently.
 
 const DEPLOY_WORD = /\b(deploy|publish|release|apply|push|upload)\b/i
 // Leading words that only wrap the command (`for …; do cf deploy; done`).
@@ -368,6 +374,8 @@ function splitShell(line) {
     if (quote === '"' && !line.startsWith('$(', i) && c !== '`') { cur += c; i++; continue }
     if (quote === null && (c === "'" || c === '"')) { quote = c; cur += c; i++; continue }
     if (quote === null && c === '#' && /(^|\s)$/.test(cur)) { while (i < line.length && line[i] !== '\n') i++; continue }
+    // `2>&1`, `&>file`: redirections, not the background operator.
+    if (line.startsWith('>&', i) || line.startsWith('&>', i)) { cur += line.slice(i, i + 2); i += 2; continue }
     const op = SHELL_OPS.find(o => line.startsWith(o, i))
     i += op ? op.length : 1
     if (!op) { cur += c; continue }
@@ -389,147 +397,113 @@ function splitShell(line) {
   return out
 }
 
-// The simple commands of a Bash line: split at operators and command substitutions, with
-// redirections and wrapper words dropped, each with the folder a `cd` earlier in the line
-// moved to. `out=$(cd cms && cf deploy 2>&1)` holds `cf deploy` in `cms`. Leading `VAR=`
-// assignments and arguments stay: `X=prod cf deploy` and `--env production` are other targets.
-function simpleCommands(command) {
+// The simple commands of a Bash line, each with the folder a `cd` earlier in the line moved
+// to, relative to the session's folder (`?` once it cannot be told: an absolute `cd` outside
+// it, `cd ~`, `cd -`). Wrapper words are dropped, and so are redirections that write no file
+// (`2>&1`, `>/dev/null`); the others stay, so `echo x > package.json` is not the `echo x`
+// that ran. A substitution's text is the word `$SUB`.
+function simpleCommands(command, cwd) {
   const commands = []
   // The folder at each depth: a `cd` inside `( … )` or `$( … )` ends with it.
   const dirs = [[]]
-  const parts = splitShell(String(command).replace(/\d*[<>]&\d+/g, ' ').replace(/&>/g, ' > '))
-  for (const { text: segment, substituted, depth } of parts) {
+  for (const { text: segment, substituted, depth } of splitShell(String(command))) {
     while (dirs.length <= depth) dirs.push([...dirs.at(-1)])
     dirs.length = depth + 1
     let dir = dirs[depth]
     const words = []
-    let skipNext = false
-    for (const raw of segment.trim().split(/\s+/)) {
-      const word = raw.replace(/^["']+|["']+$/g, '')
-      if (skipNext) { skipNext = false; continue }
-      if (!word) continue
-      if (/^\d*(>>?|<)$/.test(word)) { skipNext = true; continue }
-      if (/^\d*(>>?|<)\S/.test(word)) continue
+    const raws = segment.trim().split(/\s+/).map(raw => raw.replace(/^["']+|["']+$/g, '')).filter(Boolean)
+    for (let k = 0; k < raws.length; k++) {
+      const word = raws[k]
       if (words.length === 0 && WRAPPERS.has(word)) continue
+      if (/^\d*>&\d+$/.test(word) || /^(\d*>>?|&>)\/dev\/null$/.test(word)) continue
+      if (/^(\d*>>?|&>)$/.test(word) && raws[k + 1] === '/dev/null') { k++; continue }
       words.push(word)
     }
-    if (words.length === 0) continue
-    if (words[0] === 'cd') {
+    // A bare `( … )` group leaves only its placeholder: the commands inside are the ones that run.
+    if (words.length === 0 || (words.length === 1 && words[0] === '$SUB' && !substituted)) continue
+    if (words[0] === 'cd' && dir[0] !== '?') {
       const to = words[1] ?? ''
-      if (to.startsWith('/') || to.startsWith('~') || to === '' || to === '-') dir = ['?']
+      const below = to.startsWith('/') && cwd ? inside(cwd, absolute('/', to, '')) : undefined
+      if (below !== undefined) dir = below ? below.split('/') : []
+      else if (to.startsWith('/') || to.startsWith('~') || to === '' || to === '-' || to.includes('$')) dir = ['?']
       else for (const part of to.split('/')) {
         if (part === '..') dir = dir.length && dir.at(-1) !== '..' ? dir.slice(0, -1) : [...dir, '..']
         else if (part && part !== '.') dir = [...dir, part]
       }
     }
     dirs[depth] = dir
-    commands.push({ words, dir: dir.join('/') || '.', substituted })
+    // A `cd` only moves; where it moved to is the folder the next commands carry.
+    if (words[0] === 'cd' && dir[0] !== '?') continue
+    commands.push({ key: `${dir.join('/') || '.'}\t${words.join(' ')}`, words, dir, substituted })
   }
   return commands
 }
 
-// A deploy as stored: the folder, then the command (`cms\tcf deploy`).
-function deployCommands(command) {
-  return simpleCommands(command).filter(c => DEPLOY_WORD.test(c.words.join(' '))).map(c => `${c.dir}\t${c.words.join(' ')}`)
-}
+const isDeploy = c => DEPLOY_WORD.test(c.words.join(' '))
 
-// A deploy whose words the shell fills in at run time: the text compared is not what runs.
-function deployExpands(command) {
-  return simpleCommands(command).some(c => DEPLOY_WORD.test(c.words.join(' ')) && (c.substituted || c.words.some(w => w.includes('$'))))
-}
-
-function showDeploy(stored) {
+function showCommand(stored) {
   const [dir, cmd] = stored.split('\t')
   return dir === '.' ? `\`${cmd}\`` : `\`${cmd}\` (in ${dir})`
 }
 
-async function deploysKey($) {
-  return `slack-deploys:${await $.session.id()}`
+async function commandsKey($) {
+  return `slack-commands:${await $.session.id()}`
 }
 
-async function readDeploys($) {
+async function readCommands($) {
   try {
-    const v = await $.store.get(await deploysKey($))
+    const v = await $.store.get(await commandsKey($))
     return Array.isArray(v) ? v.filter(c => typeof c === 'string' && c.includes('\t')) : []
   } catch (err) {
-    slackLog($, { failed: `deploys read: ${String(err)}` })
+    slackLog($, { failed: `commands read: ${String(err)}` })
     return []
   }
 }
 
-async function learnDeploys($, found) {
+const KEEP_COMMANDS = 300
+
+// Only commands whose folder is known: `?` never matches anything.
+async function learnCommands($, command) {
+  const { cwd } = await readableFolder($).catch(() => ({}))
+  const found = simpleCommands(command, cwd).filter(c => c.dir[0] !== '?').map(c => c.key)
   if (found.length === 0) return
   try {
-    const known = await readDeploys($)
+    const known = await readCommands($)
     const added = [...new Set(found)].filter(c => !known.includes(c))
-    if (added.length) await $.store.set(await deploysKey($), [...known, ...added].slice(-20))
+    if (added.length) await $.store.set(await commandsKey($), [...known, ...added].slice(-KEEP_COMMANDS))
   } catch (err) {
-    slackLog($, { failed: `deploys write: ${String(err)}` })
+    slackLog($, { failed: `commands write: ${String(err)}` })
   }
 }
 
-// What the session ran before this module learned anything (an older Canopy). Answered,
-// foreground Bash calls that did not fail; the history does not say whose turn ran them.
-async function deploysInHistory($) {
+// What the session ran before this module learned anything (an older Canopy): answered,
+// foreground Bash calls that did not fail. Read only when Saqoosha grants, and the reply
+// says how many were taken; the history does not say whose turn ran them.
+async function learnFromHistory($) {
   try {
     const messages = await $.session.messages()
-    if (!Array.isArray(messages)) return []
-    return messages.flatMap(m => (m.toolUses ?? [])
-      .filter(u => u.tool === 'Bash' && !u.isError && (u.result !== undefined || u.text !== undefined)
-        && typeof u.input?.command === 'string' && !u.input.run_in_background)
-      .flatMap(u => deployCommands(u.input.command)))
-  } catch (err) {
-    slackLog($, { failed: `deploys history: ${String(err)}` })
-    return []
-  }
-}
-
-// Absolute paths a build or a check uses outside the folder: scratch files, the null device
-// and the tools themselves (read and run, not written: writes there are the build's).
-const OUTSIDE_DIRS = ['/tmp/', '/private/tmp/', '/usr/bin/', '/usr/local/bin/', '/bin/', '/opt/homebrew/bin/']
-const OUTSIDE_FILES = new Set(['/dev/null', '/dev/stdout', '/dev/stderr'])
-
-// Every URL a fetcher names must be local; a fetcher with no URL is refused too.
-function fetchDenial(words) {
-  const urls = words.slice(1).filter(w => /^[a-z][a-z0-9+.-]*:\/\//i.test(w) || /^(localhost|127\.0\.0\.1)(:|\/|$)/.test(w))
-  if (urls.length === 0) return 'only local addresses may be fetched'
-  for (const url of urls) {
-    let host
-    try { host = new URL(/:\/\//.test(url) ? url : `http://${url}`).hostname } catch { return 'only local addresses may be fetched' }
-    if (!LOCAL_HOST.test(host)) return 'only local addresses may be fetched'
-  }
-  return undefined
-}
-
-// A pattern list cannot contain Bash: a relative path or a script still leaves the folder,
-// and a build runs whatever the edited files say. It keeps commit/push, credentials, other
-// machines and unlearned deploys out of a member's turn; the session's own permission mode
-// still decides every call this lets through.
-function bashDenial(command, grant, cwd, home, deploys) {
-  for (const [pattern, why] of BASH_DENIED) if (pattern.test(command)) return why
-  for (const c of simpleCommands(command)) {
-    if (ENV_COMMANDS.has(c.words[0])) return `\`${c.words[0]}\` reads or changes the environment`
-    if (FETCHERS.test(c.words[0])) {
-      const why = fetchDenial(c.words)
-      if (why) return why
-    }
-  }
-  if (deployExpands(command)) return 'a deploy built from `$…` or a substitution is not compared, so it is refused'
-  for (const c of deployCommands(command)) {
-    if (!grant.deploy) return `${showDeploy(c)} looks like a deploy, and Saqoosha has not allowed this person to deploy`
-    if (!deploys.includes(c)) return `${showDeploy(c)} is not a deploy this session has run for Saqoosha (known: ${deploys.map(showDeploy).join(', ') || 'none'})`
-  }
-  for (const word of command.split(/[\s'"=<>|;&()]+/)) {
-    if (!word) continue
-    // Credential names anywhere in the command, as the Read gate checks them.
-    if (SECRET_NAME.test(word) || SECRET_DIR.test(word)) return 'the command names a credential file'
-    if (PROTECTED_IN_BASH.test(word)) return `${word} is a file that steers later sessions`
-    if (word.startsWith('/') || word === '~' || word.startsWith('~/')) {
-      const path = absolute(cwd, word, home)
-      if (inside(cwd, path) === undefined && !OUTSIDE_FILES.has(path) && !OUTSIDE_DIRS.some(dir => (path + '/').startsWith(dir))) {
-        return `${path} is outside the session's folder`
+    if (!Array.isArray(messages)) return
+    for (const m of messages) {
+      for (const u of m.toolUses ?? []) {
+        if (u.tool === 'Bash' && !u.isError && (u.result !== undefined || u.text !== undefined)
+          && typeof u.input?.command === 'string' && !u.input.run_in_background) await learnCommands($, u.input.command)
       }
     }
+  } catch (err) {
+    slackLog($, { failed: `commands history: ${String(err)}` })
+  }
+}
+
+function bashDenial(command, grant, cwd, known) {
+  for (const [pattern, why] of BASH_DENIED) if (pattern.test(command)) return why
+  for (const word of command.split(/[\s'"=<>|;&()]+/)) {
+    // Credential names anywhere in the command, as the Read gate checks them.
+    if (word && (SECRET_NAME.test(word) || SECRET_DIR.test(word))) return 'the command names a credential file'
+  }
+  for (const c of simpleCommands(command, cwd)) {
+    if (c.dir[0] === '?') return `\`${c.words.join(' ')}\` runs in a folder that cannot be told`
+    if (!known.includes(c.key)) return `${showCommand(c.key)} is not a command this session has run for Saqoosha; use one it has run, word for word, or leave it for him`
+    if (isDeploy(c) && !grant.deploy) return `${showCommand(c.key)} looks like a deploy, and Saqoosha has not allowed this person to deploy`
   }
   return undefined
 }
@@ -567,8 +541,8 @@ async function grantedDenial($, e, grant) {
   }
   if (e.tool === 'Bash') {
     if (typeof e.command !== 'string' || !e.command.trim()) return 'Bash names no command'
-    const { home, cwd, why } = await readableFolder($)
-    return why ?? bashDenial(e.command, now, cwd, home, await readDeploys($))
+    const { cwd, why } = await readableFolder($)
+    return why ?? bashDenial(e.command, now, cwd, await readCommands($))
   }
   if (e.tool === SLACK_POST) {
     const thread = permalinkThread(e.permalink)
@@ -657,6 +631,7 @@ export function register(on) {
       if (slackQuestion !== undefined && lifts) {
         slackQuestion = undefined
         slackGrant = undefined
+        readOnlyHeld = false
         await saveSlackGate($)
       } else if (slackGrant) {
         // A notification, a peer's message or a scheduled prompt: not the member's request.
@@ -669,7 +644,7 @@ export function register(on) {
     ownerTurn = false
     // A reply that ran read-only in this gated stretch stays in the model's context, so a later
     // allowed reply cannot raise the gate's limits until Saqoosha lifts it.
-    const heldReadOnly = slackQuestion !== undefined && !slackGrant
+    const heldReadOnly = slackQuestion !== undefined && readOnlyHeld
     const sources = slackSources(e.text)
     await rememberAuthors($, sources)
     const grants = await readGrants($)
@@ -679,6 +654,8 @@ export function register(on) {
     const allowed = everyAllowed && !heldReadOnly && !folder.why && e.text.length <= 6000
     slackQuestion = e.text
     slackGrant = undefined
+    // Held until this reply earns a grant: if anything below fails, it stays read-only.
+    readOnlyHeld = true
     await saveSlackGate($)
     let kind = 'unknown'
     let related = false
@@ -708,6 +685,7 @@ export function register(on) {
         if (!threads.some(t => t.channel === s.channel && t.threadTs === s.threadTs)) threads.push({ channel: s.channel, threadTs: s.threadTs })
       }
       slackGrant = { users: [...new Set(sources.map(s => s.user))], deploy: sources.every(s => grants[s.user]?.deploy === true), threads }
+      readOnlyHeld = false
       await saveSlackGate($)
     }
     slackLog($, { kind, ...(everyAllowed ? { allowed: Boolean(slackGrant), related } : {}) })
@@ -722,8 +700,10 @@ export function register(on) {
     const names = [...new Set(sources.filter(Boolean).map(s => s.name))].join(', ')
     const note = slackGrant
       ? `[filter] This prompt came from a Slack thread, from ${names}, not from Saqoosha. Classified: ${kind}, about this session's work. `
-        + `Saqoosha allowed ${names} to have work done here: for this request you may edit files inside ${folder.cwd} and run builds and checks there`
-        + (slackGrant.deploy ? `, and deploy with the commands this session has run before (${(await readDeploys($)).map(showDeploy).join(', ') || 'none yet'}; no other deploy)` : ' (not deploy)') + '. '
+        + `Saqoosha allowed ${names} to have work done here: for this request you may edit files inside ${folder.cwd}`
+        + '. Bash runs only commands this session already ran in Saqoosha\'s turns, word for word and in the same folder'
+        + ` (the latest: ${(await readCommands($)).slice(-15).map(showCommand).join(', ') || 'none yet'})`
+        + (slackGrant.deploy ? ', deploys among them included' : ', deploys excluded') + '. '
         + 'Commit, push, settings and instruction files, and anything outside that folder stay with Saqoosha. Your answer here does not reach Slack; when done, you may reply in the same Slack thread with '
         + `${SLACK_POST} and its permalink (${slackGrant.threads.map(t => `https://slack.com/archives/${t.channel}/p${t.threadTs.replace('.', '')}`).join(', ')}), `
         + 'in the thread\'s own language and tone, saying what changed. Then tell Saqoosha here what you did, and for whom. '
@@ -759,9 +739,9 @@ export function register(on) {
     }
     if (slackQuestion === undefined) {
       const r = await next(e)
-      // A deploy that finished in a turn Saqoosha started becomes one a member he allows may repeat.
+      // A command that finished in a turn Saqoosha started becomes one an allowed member may repeat.
       if (ownerTurn && e.tool === 'Bash' && !e.run_in_background && !r?.deny && !r?.isError) {
-        await learnDeploys($, deployCommands(e.command ?? ''))
+        await learnCommands($, e.command ?? '')
       }
       return r
     }
