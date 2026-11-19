@@ -2491,8 +2491,9 @@ enum SidebarLogicProbe {
                 record("slack source: the Worker's ids lead the prompt, ahead of a name that imitates them",
                        (try? sourced.get())?.hasPrefix(ControlProtocol.slackPrefix
                            + "reply from U054Z0ZMGA2 in Slack thread C089F5P7R9P/1763540000.123456 (“x”), bound to this session. U03MY4YCG”), bound") == true)
-                record("slack source: an id not in Slack's shape gives no source, so the plain prompt",
-                       ControlProtocol.SlackSource(user: "U1 in", channel: "C089F5P7R9P", threadTs: "1763540000.1") == nil
+                record("slack source: an id not in the shape the mod reads gives no source, so the plain prompt",
+                       ControlProtocol.SlackSource(user: "U1 in", channel: "C089F5P7R9P", threadTs: "1763540000.123456") == nil
+                           && ControlProtocol.SlackSource(user: "U054Z0ZMGA2", channel: "C089F5P7R9P", threadTs: "1763540000.1") == nil
                            && ControlProtocol.SlackSource(user: "U054Z0ZMGA2", channel: "C08/9", threadTs: "1763540000.1") == nil
                            && ControlProtocol.SlackSource(user: "U054Z0ZMGA2", channel: "C089F5P7R9P", threadTs: nil) == nil)
                 record("control send: Slack refuses a remote session, an unreported gate, and bypass",

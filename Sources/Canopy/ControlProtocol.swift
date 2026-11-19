@@ -419,19 +419,18 @@ enum ControlProtocol {
         let channel: String
         let threadTs: String
 
-        /// Nil unless every field has Slack's own shape: the mod parses them back by that shape.
+        /// Nil unless every field has the shape the mod parses back (`SLACK_SOURCE`).
         init?(user: Any?, channel: Any?, threadTs: Any?) {
             guard let user = user as? String, user.wholeMatch(of: /[UW][A-Z0-9]{2,20}/) != nil,
                   let channel = channel as? String, channel.wholeMatch(of: /[CDG][A-Z0-9]{2,20}/) != nil,
-                  let threadTs = threadTs as? String, threadTs.wholeMatch(of: /\d{6,12}\.\d{1,8}/) != nil else { return nil }
+                  let threadTs = threadTs as? String, threadTs.wholeMatch(of: /\d{6,12}\.\d{6}/) != nil else { return nil }
             self.user = user
             self.channel = channel
             self.threadTs = threadTs
         }
     }
 
-    /// With a source, the ids come before the name: a display name can hold any text, so
-    /// nothing it says can move them (`SLACK_SOURCE` in the mod reads this line).
+    /// Ids before the name, so a display name cannot move them (`SLACK_SOURCE` in the mod).
     static func slackPrompt(asker: String, text: String, source: SlackSource? = nil) -> String {
         let name = slackInert(asker.components(separatedBy: .newlines).joined(separator: " "))
         let from = source.map { "\($0.user) in Slack thread \($0.channel)/\($0.threadTs) (“\(name)”), bound to this session. " }
@@ -486,7 +485,7 @@ enum ControlProtocol {
     }
 
     /// Why a Slack reply may not reach this session, or nil: each case is a
-    /// session the mod's read-only gate may not cover.
+    /// session the mod's gate may not cover.
     static func slackRefusal(isRemote: Bool, gateReady: Bool, permissionMode: PermissionMode) -> String? {
         if isRemote { return slackRemoteRefusal }
         if !gateReady { return "the canopy-bridge gate has not reported from this session" }

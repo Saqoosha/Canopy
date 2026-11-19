@@ -302,6 +302,10 @@ final class SlackBridge {
             return failed("the session is not open on Saqoosha's Mac")
         }
         let source = ControlProtocol.SlackSource(user: message["user"], channel: message["channel"], threadTs: message["threadTs"])
+        // Without a source the reply arrives as nobody's, so /slack-allow cannot apply to it.
+        if source == nil, message["user"] != nil {
+            logger.notice("[slack] reply \(replyId, privacy: .public) has ids the mod cannot read; delivered without them")
+        }
         switch ControlProtocol.slackDelivery(asker: author, text: text, source: source, fromOwner: message["owner"] as? Bool == true,
                                              isRemote: shim.remoteHost != nil, gateReady: shim.slackGateReady,
                                              permissionMode: shim.permissionMode) {
