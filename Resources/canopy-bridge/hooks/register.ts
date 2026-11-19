@@ -412,7 +412,8 @@ function simpleCommands(command, cwd) {
     dirs.length = depth + 1
     let dir = dirs[depth]
     const words = []
-    const raws = segment.trim().split(/\s+/).map(raw => raw.replace(/^["']+|["']+$/g, '')).filter(Boolean)
+    // Quotes stay: `echo 'x > package.json'` prints, `echo x > package.json` writes.
+    const raws = segment.trim().split(/\s+/).filter(Boolean)
     for (let k = 0; k < raws.length; k++) {
       const word = raws[k]
       if (words.length === 0 && WRAPPERS.has(word)) continue

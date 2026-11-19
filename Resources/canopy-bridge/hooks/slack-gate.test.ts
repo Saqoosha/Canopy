@@ -759,3 +759,11 @@ test('listing does not read the history; granting does, and says how many it too
   expect(store.get('slack-commands:sid')).toBeUndefined()
   expect((await allow($, '保坂')).text).toContain('2 just read from the conversation')
 })
+
+test('quoting is part of the command: printing a redirection is not making it', async ($, on) => {
+  engine(on, { answer: 'CHANGE_REQUEST RELATED' })
+  await allowed($, '保坂', ["echo 'x > package.json'", 'echo "$out" | tail -2'])
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'echo x > package.json' }))).toBe(true)
+  expect(denied(await $.tool.call({ tool: 'Bash', command: "echo 'x > package.json'" }))).toBe(false)
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'echo "$out" | tail -2' }))).toBe(false)
+})
