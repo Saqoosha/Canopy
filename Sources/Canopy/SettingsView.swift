@@ -308,8 +308,11 @@ private struct MacroPadSettingsTab: View {
 
                 Toggle("Pad is rotated 180°", isOn: $settings.macroPadReversed)
                     .disabled(settings.macroPadSource.isOff)
+
+                Toggle("Turn off with the display", isOn: $settings.macroPadSleepWithDisplay)
+                    .disabled(settings.macroPadSource != .local)
             } footer: {
-                SettingsFooter(text: "Lights each pane's activity on the pad's keys, and switches panes when a key is pressed. Local USB connects automatically when the pad is plugged in; Remote bridge reaches a pad on another Mac running scripts/macropad-bridge.sh. A small indicator at the bottom of the sidebar shows the link state, and clicking it switches source without coming here. Turn on \"Pad is rotated 180°\" when the pad is mounted upside-down relative to its printed key order, so the leftmost pane lights and answers on the key that now looks leftmost.")
+                SettingsFooter(text: "Lights each pane's activity on the pad's keys, and switches panes when a key is pressed. Local USB connects automatically when the pad is plugged in; Remote bridge reaches a pad on another Mac running scripts/macropad-bridge.sh. A small indicator at the bottom of the sidebar shows the link state, and clicking it switches source without coming here. Turn on \"Pad is rotated 180°\" when the pad is mounted upside-down relative to its printed key order, so the leftmost pane lights and answers on the key that now looks leftmost. \"Turn off with the display\" darkens a USB pad while this Mac's display is off, asleep, or at brightness 0.")
             }
             .onAppear { hostDraft = settings.macroPadRemoteHost }
         }

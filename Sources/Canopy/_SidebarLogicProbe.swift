@@ -11320,6 +11320,28 @@ enum SidebarLogicProbe {
         // which only the first is reachable here; the other two live in the
         // diff cache and in `UserDefaults`.
         do {
+            do {
+                let e = DisplayDarkMonitor.evaluate
+                record("display dark: screens asleep wins over a lit reading",
+                       e(true, false, [75], false))
+                record("display dark: an active built-in panel counts as lit",
+                       !e(false, true, [0], true))
+                record("display dark: no external monitor and no built-in is dark",
+                       e(false, false, [], false))
+                record("display dark: every external at brightness 0 is dark",
+                       e(false, false, [0, 0], false))
+                record("display dark: one lit external keeps the pad lit",
+                       !e(false, false, [0, 40, nil], true))
+                record("display dark: an unknown read keeps the previous verdict",
+                       e(false, false, [nil], true) && !e(false, false, [nil], false)
+                       && e(false, false, [0, nil], true) && !e(false, false, [0, nil], false))
+            }
+            record("macropad fade: starts at the old level and ends exactly at the new one",
+                   MacroPadController.fadeLevel(from: 30, to: 0, progress: 0) == 30
+                       && MacroPadController.fadeLevel(from: 30, to: 0, progress: 1) == 0
+                       && MacroPadController.fadeLevel(from: 0, to: 30, progress: 2) == 30)
+            record("macropad fade: halfway is below the linear midpoint (sqrt curve)",
+                   MacroPadController.fadeLevel(from: 0, to: 36, progress: 0.5) == 9)
             record("macropad brightness: asleep overrides the setting",
                    MacroPadController.effectiveBrightness(percent: 60, isAsleep: true) == 0)
             record("macropad brightness: awake passes the setting through",
