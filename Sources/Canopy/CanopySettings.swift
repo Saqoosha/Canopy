@@ -132,8 +132,8 @@ final class CanopySettings {
     var macroPadReversed: Bool = false {
         didSet { save() }
     }
-    /// Dark pad while this Mac's screens are off, asleep, or at brightness 0
-    /// (`DisplayDarkMonitor`). Local pads only.
+    /// Dark pad while this Mac's screens are dark (`DisplayDarkMonitor`).
+    /// Local pads only.
     var macroPadSleepWithDisplay: Bool = true {
         didSet { save() }
     }
@@ -319,6 +319,8 @@ final class CanopySettings {
         }
         if let sleepWithDisplay = dict["canopy.macroPadSleepWithDisplay"] as? Bool {
             macroPadSleepWithDisplay = sleepWithDisplay
+        } else if dict["canopy.macroPadSleepWithDisplay"] != nil {
+            logger.notice("MacroPad: canopy.macroPadSleepWithDisplay is not a boolean; ignoring it and keeping \(self.macroPadSleepWithDisplay, privacy: .public)")
         }
         if let brightness = dict["canopy.macroPadBrightness"] as? Int { macroPadBrightness = min(100, max(0, brightness)) }
         if let raw = dict["canopy.defaultPermissionMode"] as? String,

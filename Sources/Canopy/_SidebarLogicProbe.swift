@@ -11322,19 +11322,20 @@ enum SidebarLogicProbe {
         do {
             do {
                 let e = DisplayDarkMonitor.evaluate
-                record("display dark: screens asleep wins over a lit reading",
-                       e(true, false, [75], false))
                 record("display dark: an active built-in panel counts as lit",
-                       !e(false, true, [0], true))
-                record("display dark: no external monitor and no built-in is dark",
-                       e(false, false, [], false))
+                       !e(true, [0], true, true))
+                record("display dark: no AV service after one was seen is dark (monitor off)",
+                       e(false, [], true, false))
+                record("display dark: no AV service ever seen keeps the previous verdict (Intel, DisplayLink)",
+                       !e(false, [], false, false))
                 record("display dark: every external at brightness 0 is dark",
-                       e(false, false, [0, 0], false))
+                       e(false, [0, 0], true, false))
                 record("display dark: one lit external keeps the pad lit",
-                       !e(false, false, [0, 40, nil], true))
+                       !e(false, [0, 40, nil], true, true))
                 record("display dark: an unknown read keeps the previous verdict",
-                       e(false, false, [nil], true) && !e(false, false, [nil], false)
-                       && e(false, false, [0, nil], true) && !e(false, false, [0, nil], false))
+                       e(false, [nil], true, true))
+                record("display dark: an unknown read keeps a lit verdict lit",
+                       !e(false, [nil], true, false) && !e(false, [0, nil], true, false))
             }
             record("macropad fade: starts at the old level and ends exactly at the new one",
                    MacroPadController.fadeLevel(from: 30, to: 0, progress: 0) == 30

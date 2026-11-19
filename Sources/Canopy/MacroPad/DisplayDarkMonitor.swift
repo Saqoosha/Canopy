@@ -5,44 +5,44 @@ import os
 
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "DisplayDark")
 
-/// Reports whether nobody can see this Mac's screens, so the MacroPad can go
-/// dark with them.
+/// Reports whether this Mac's screens are dark, so a USB MacroPad can go dark
+/// with them. Measured on an M1 Max in clamshell with an MSI PX32UFWAVE over
+/// USB-C (2026-11-19):
 ///
-/// Three signals, measured on an M1 Max in clamshell with an MSI PX32UFWAVE
-/// over USB-C (2026-11-19):
+/// - Monitor switched off at its button: clamshell sleep posts
+///   `screensDidSleepNotification`; on a Mac that stays awake the monitor's
+///   AV service disappears from the registry instead.
+/// - Brightness 0 in the monitor's OSD: DDC/CI VCP 0x10 reads 0. Polled.
+/// - A failed DDC read is unknown and keeps the previous DDC verdict. While
+///   the monitor's input is on another computer every read fails (28 min).
 ///
-/// - **Monitor switched off at its button.** With the lid closed the Mac
-///   enters clamshell sleep, and `screensDidSleepNotification` arrives first.
-///   The monitor's AV service also disappears from the registry while it is
-///   off, which is what `externalBrightness` being empty covers on a Mac that
-///   stays awake.
-/// - **Brightness 0 in the monitor's own OSD.** Visible over DDC/CI as VCP
-///   0x10 reading 0. There is no notification; it is polled.
-/// - **DDC answers unreliably.** A single read fails often (BetterDisplay was
-///   running too), and while the monitor's input is switched to another
-///   computer no read succeeds at all (28 minutes, measured). A failed read
-///   is therefore "unknown" and keeps the previous verdict rather than
-///   reading as lit or dark, so switching the input away leaves the pad lit.
+/// An active built-in panel always counts as lit; its brightness is not read.
 @MainActor
 final class DisplayDarkMonitor {
-    /// Short enough that the pad follows a brightness change within a few
-    /// seconds; one poll costs one DDC round trip per external monitor.
     private static let pollInterval: TimeInterval = 5
 
-    private let onChange: (Bool) -> Void
+    private let onChange: () -> Void
     private let pollQueue = DispatchQueue(label: "sh.saqoo.Canopy.display-dark", qos: .utility)
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
     private var screensAsleep = false
+    /// The verdict from the last DDC poll, kept apart from sleep so that a
+    /// wake followed by failing reads does not inherit the sleep's "dark".
+    private var externalDark = false
+    /// Whether an external AV service has been seen since launch. Until one
+    /// has, an empty list means "not readable here" (Intel, DisplayLink),
+    /// not "monitor off".
+    private var sawExternal = false
     private var pollInFlight = false
-    private(set) var isDark = false
+    private var pollAgain = false
 
-    init(onChange: @escaping (Bool) -> Void) {
+    /// False while disabled, so a stale verdict is never applied.
+    var isDark: Bool { timer != nil && (screensAsleep || externalDark) }
+
+    init(onChange: @escaping () -> Void) {
         self.onChange = onChange
     }
 
-    /// Starts or stops polling. Stopping keeps the last verdict: it is only
-    /// read while enabled, and a re-enable polls at once.
     func setEnabled(_ enabled: Bool) {
         if enabled == (timer != nil) { return }
         logger.notice("Display dark monitor enabled=\(enabled, privacy: .public)")
@@ -50,14 +50,12 @@ final class DisplayDarkMonitor {
             let center = NSWorkspace.shared.notificationCenter
             for (name, asleep) in [(NSWorkspace.screensDidSleepNotification, true),
                                    (NSWorkspace.screensDidWakeNotification, false)] {
-                observers.append(center.addObserver(forName: name, object: nil, queue: .main) { _ in
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
-                        self.screensAsleep = asleep
-                        if asleep { self.update(builtInActive: false, externalBrightness: []) } else { self.poll() }
-                    }
+                observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    Task { @MainActor in self?.screensChanged(asleep: asleep) }
                 })
             }
+            screensAsleep = CGDisplayIsAsleep(CGMainDisplayID()) != 0
+            externalDark = false
             let timer = Timer.scheduledTimer(withTimeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
                 Task { @MainActor in self?.poll() }
             }
@@ -67,49 +65,67 @@ final class DisplayDarkMonitor {
         } else {
             timer?.invalidate()
             timer = nil
+            pollAgain = false
             observers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
             observers.removeAll()
         }
     }
 
+    private func screensChanged(asleep: Bool) {
+        guard timer != nil else { return }
+        let before = isDark
+        screensAsleep = asleep
+        report(before: before, reason: asleep ? "screens asleep" : "screens awake")
+        if !asleep { poll() }
+    }
+
+    /// Skipped while the screens sleep: the verdict is already dark, and DDC
+    /// traffic can wake a monitor in standby.
     private func poll() {
-        guard timer != nil, !pollInFlight else { return }
+        guard timer != nil, !screensAsleep else { return }
+        guard !pollInFlight else { pollAgain = true; return }
         pollInFlight = true
         pollQueue.async { [weak self] in
             let builtIn = Self.builtInDisplayActive()
             let external = Self.readExternalBrightness()
             Task { @MainActor in
+                // nil: the registry query itself failed, so this poll says nothing.
                 guard let self else { return }
                 self.pollInFlight = false
+                // A poll that a wake overtook read the sleeping state; read again.
+                if self.pollAgain { self.pollAgain = false; self.poll(); return }
+                guard self.timer != nil, !self.screensAsleep, let external else { return }
                 self.update(builtInActive: builtIn, externalBrightness: external)
             }
         }
     }
 
     private func update(builtInActive: Bool, externalBrightness: [Int?]) {
-        let dark = Self.evaluate(screensAsleep: screensAsleep,
-                                 builtInActive: builtInActive,
-                                 externalBrightness: externalBrightness,
-                                 previous: isDark)
-        logger.debug("poll dark=\(dark, privacy: .public) builtIn=\(builtInActive, privacy: .public) external=\(String(describing: externalBrightness), privacy: .public)")
-        guard dark != isDark else { return }
-        isDark = dark
+        let before = isDark
+        externalDark = Self.evaluate(builtInActive: builtInActive,
+                                     externalBrightness: externalBrightness,
+                                     sawExternal: sawExternal,
+                                     previous: externalDark)
+        if !externalBrightness.isEmpty { sawExternal = true }
         let readings = externalBrightness.map { $0.map(String.init) ?? "?" }.joined(separator: ",")
-        logger.notice("Display dark=\(dark, privacy: .public) screensAsleep=\(self.screensAsleep, privacy: .public) builtIn=\(builtInActive, privacy: .public) external=[\(readings, privacy: .public)]")
-        onChange(dark)
+        logger.debug("poll dark=\(self.externalDark, privacy: .public) builtIn=\(builtInActive, privacy: .public) external=[\(readings, privacy: .public)]")
+        report(before: before, reason: "builtIn=\(builtInActive) external=[\(readings)]")
     }
 
-    /// The verdict, pure so the probe can reach it. `externalBrightness` has
-    /// one entry per external monitor, nil where the DDC read failed.
-    nonisolated static func evaluate(screensAsleep: Bool,
-                                     builtInActive: Bool,
+    private func report(before: Bool, reason: String) {
+        guard isDark != before else { return }
+        logger.notice("Display dark=\(self.isDark, privacy: .public) \(reason, privacy: .public)")
+        onChange()
+    }
+
+    /// The DDC verdict, pure so the probe can reach it. `externalBrightness`
+    /// has one entry per external monitor, nil where the read failed.
+    nonisolated static func evaluate(builtInActive: Bool,
                                      externalBrightness: [Int?],
+                                     sawExternal: Bool,
                                      previous: Bool) -> Bool {
-        if screensAsleep { return true }
-        // The built-in panel's brightness is not read, so an active one
-        // counts as lit.
         if builtInActive { return false }
-        if externalBrightness.isEmpty { return true }
+        if externalBrightness.isEmpty { return sawExternal ? true : previous }
         if externalBrightness.contains(where: { ($0 ?? 0) > 0 }) { return false }
         if externalBrightness.allSatisfy({ $0 == 0 }) { return true }
         return previous
@@ -126,12 +142,11 @@ final class DisplayDarkMonitor {
         }
     }
 
-    /// One entry per external `DCPAVServiceProxy` (Apple Silicon only; an
-    /// Intel Mac has none and reads as "no external monitor").
-    nonisolated private static func readExternalBrightness() -> [Int?] {
+    /// One entry per external `DCPAVServiceProxy` (Apple Silicon only).
+    nonisolated private static func readExternalBrightness() -> [Int?]? {
         var iterator = io_iterator_t()
         guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("DCPAVServiceProxy"), &iterator) == KERN_SUCCESS else {
-            return []
+            return nil
         }
         defer { IOObjectRelease(iterator) }
         var result: [Int?] = []
@@ -139,15 +154,14 @@ final class DisplayDarkMonitor {
             defer { IOObjectRelease(service) }
             let location = IORegistryEntryCreateCFProperty(service, "Location" as CFString, kCFAllocatorDefault, 0)?
                 .takeRetainedValue() as? String
-            guard location == "External",
-                  let av = IOAVServiceCreateWithService(kCFAllocatorDefault, service)?.takeRetainedValue()
-            else { continue }
-            result.append(readBrightness(av))
+            guard location == "External" else { continue }
+            result.append(IOAVServiceCreateWithService(kCFAllocatorDefault, service)
+                .flatMap { readBrightness($0.takeRetainedValue()) })
         }
         return result
     }
 
-    /// DDC/CI "Get VCP Feature" for 0x10. The reply's first two header bytes
+    /// DDC/CI "Get VCP Feature" for 0x10. The reply's length and opcode bytes
     /// arrive garbled on this path (measured: `6e 51 be 00 10 …` where the
     /// spec says `6e 88 02 00 10 …`), so only the result code and the echoed
     /// opcode are checked.
@@ -169,7 +183,9 @@ final class DisplayDarkMonitor {
             var reply = [UInt8](repeating: 0, count: 12)
             if IOAVServiceReadI2C(av, 0x37, 0x51, &reply, UInt32(reply.count)) == kIOReturnSuccess,
                reply[3] == 0x00, reply[4] == code {
-                return Int(reply[8]) << 8 | Int(reply[9])
+                let max = Int(reply[6]) << 8 | Int(reply[7])
+                let current = Int(reply[8]) << 8 | Int(reply[9])
+                if max > 0, current <= max { return current }
             }
             usleep(50_000)
         }
@@ -177,8 +193,7 @@ final class DisplayDarkMonitor {
     }
 }
 
-// Private IOKit SPI used by every DDC tool on Apple Silicon (m1ddc,
-// MonitorControl, BetterDisplay).
+// Private IOKit SPI, as used by m1ddc, MonitorControl and BetterDisplay.
 @_silgen_name("IOAVServiceCreateWithService")
 private func IOAVServiceCreateWithService(_ allocator: CFAllocator?, _ service: io_service_t) -> Unmanaged<CFTypeRef>?
 @_silgen_name("IOAVServiceReadI2C")

@@ -621,7 +621,7 @@ final class MacroPadController {
     /// Unlike `isAsleep` it is not persisted and not woken by a key press;
     /// it follows the display. Ignored when `macroPadSleepWithDisplay` is off
     /// and for a remote pad, which sits at another Mac's desk.
-    private lazy var displayMonitor = DisplayDarkMonitor { [weak self] _ in
+    private lazy var displayMonitor = DisplayDarkMonitor { [weak self] in
         guard let self else { return }
         self.applyBrightness(self.settings.macroPadBrightness, animated: true)
     }
@@ -1349,14 +1349,14 @@ final class MacroPadController {
     /// `animated` fades to the new level over `fadeDuration` instead of
     /// jumping — used when sleep or the display turns the pad off or on. The
     /// firmware applies `B` at once and takes integers only, so the fade is a
-    /// series of `B` commands from here. A non-animated call aimed at the
-    /// fade's own target leaves the fade running: `refresh()` calls this on
-    /// every pass, and would otherwise cut every fade short.
+    /// series of `B` commands from here. Any call aimed at the fade's own
+    /// target leaves it running (`refresh()` calls this on every pass); a
+    /// call aimed elsewhere cancels it.
     private func applyBrightness(_ percent: Int, animated: Bool = false) {
         guard isConnected else { cancelFade(); return }
-        let displayDark = displayMonitor.isDark
-            && settings.macroPadSleepWithDisplay && settings.macroPadSource == .local
-        let clamped = Self.effectiveBrightness(percent: percent, isAsleep: isAsleep || displayDark)
+        // `refresh()` enables the monitor only for a connected local pad with
+        // the setting on, and `isDark` is false while it is disabled.
+        let clamped = Self.effectiveBrightness(percent: percent, isAsleep: isAsleep || displayMonitor.isDark)
         if fade?.target == clamped { return }
         cancelFade()
         guard lastBrightness != clamped else { return }
@@ -1364,18 +1364,22 @@ final class MacroPadController {
             sendBrightness(clamped)
             return
         }
-        fade = (from: from, target: clamped, start: ProcessInfo.processInfo.systemUptime)
         let timer = Timer.scheduledTimer(withTimeInterval: Self.fadeStep, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.fadeTick() }
         }
         RunLoop.main.add(timer, forMode: .common)
-        fadeTimer = timer
+        fade = Fade(from: from, target: clamped, start: ProcessInfo.processInfo.systemUptime, timer: timer)
     }
 
     private static let fadeDuration: TimeInterval = 0.5
     private static let fadeStep: TimeInterval = 0.04
-    private var fade: (from: Int, target: Int, start: TimeInterval)?
-    private var fadeTimer: Timer?
+    private struct Fade {
+        let from: Int
+        let target: Int
+        let start: TimeInterval
+        let timer: Timer
+    }
+    private var fade: Fade?
 
     private func fadeTick() {
         guard let fade, isConnected else { cancelFade(); return }
@@ -1386,8 +1390,7 @@ final class MacroPadController {
     }
 
     private func cancelFade() {
-        fadeTimer?.invalidate()
-        fadeTimer = nil
+        fade?.timer.invalidate()
         fade = nil
     }
 
@@ -1401,6 +1404,7 @@ final class MacroPadController {
     /// far bigger change than 29→30. Pure for the probe.
     static func fadeLevel(from: Int, to: Int, progress: Double) -> Int {
         let t = min(1, max(0, progress))
+        let from = max(0, from), to = max(0, to)
         let root = Double(from).squareRoot() + (Double(to).squareRoot() - Double(from).squareRoot()) * t
         return Int((root * root).rounded())
     }
@@ -1516,6 +1520,8 @@ final class MacroPadController {
             portBusyPath = busyPath
             publishStatus()
         case .disconnected:
+            displayMonitor.setEnabled(false)
+            cancelFade()
             // The `didSet` clears `portBusyPath` here: a disconnect says
             // nothing about who holds the port NOW, and the pass that follows
             // is what answers. Keeping a stale path would let the indicator
