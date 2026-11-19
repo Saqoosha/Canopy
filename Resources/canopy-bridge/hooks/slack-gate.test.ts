@@ -582,7 +582,7 @@ test('a member\'s edit may not touch what steers later sessions or the deploy, o
   for (const call of [
     edit(`${CWD}/.claude/settings.json`), edit(`${CWD}/CLAUDE.md`), edit(`${CWD}/cms/AGENTS.md`), edit(`${CWD}/package.json`),
     edit(`${CWD}/cms/wrangler.jsonc`), edit(`${CWD}/cms/cloudflare.config.ts`), edit(`${CWD}/.git/hooks/pre-commit`),
-    edit(`${CWD}/scripts/deploy.sh`), { tool: 'Write', file_path: `${CWD}/uplink/new.txt`, content: 'x' },
+    edit(`${CWD}/scripts/deploy.sh`), { tool: 'Write', file_path: `${CWD}/.CLAUDE/settings.json`, content: 'x' }, { tool: 'Write', file_path: `${CWD}/claude.md`, content: 'x' }, { tool: 'Write', file_path: `${CWD}/uplink/new.txt`, content: 'x' },
     { tool: 'NotebookEdit', notebook_path: `${CWD}/../x.ipynb`, new_source: 'x' }, { tool: 'Edit', old_string: 'a', new_string: 'b' },
     { tool: 'MultiEdit', file_path: `${CWD}/.env`, edits: [] },
   ]) expect(denied(await $.tool.call(call))).toBe(true)

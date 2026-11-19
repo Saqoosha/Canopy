@@ -340,10 +340,11 @@ const SLACK_POST = 'mcp__saqoolaude__slack_post'
 
 // Files that run or steer later turns (hooks, settings, instructions) or define the learned
 // deploys. A member's edit there would outlast the request or rewrite what `deploy` runs.
+// Case-insensitive, as macOS volumes are.
 const PROTECTED = new RegExp('(^|/)(' + [
   '\\.claude', '\\.git', '\\.husky', '\\.github', '\\.vscode', 'CLAUDE\\.md', 'AGENTS\\.md', '\\.mcp\\.json', '\\.envrc',
   'lefthook\\.ya?ml', 'package\\.json', 'Makefile', 'justfile', 'wrangler\\.[^/]*', 'cloudflare\\.config\\.[^/]*', '[^/]*\\.sh',
-].join('|') + ')(/|$)')
+].join('|') + ')(/|$)', 'i')
 // Commands Saqoosha keeps for himself: refused for a member even when his own turn ran them.
 // Each reads the whole line, so `bash -c 'git push'` is caught as well.
 const BASH_DENIED = [
