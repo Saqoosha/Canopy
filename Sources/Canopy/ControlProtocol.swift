@@ -412,9 +412,30 @@ enum ControlProtocol {
     /// (`SLACK_PREFIX` in `Resources/canopy-bridge/hooks/register.ts`), so a bare quote of the mark does not.
     static let slackPrefix = "\(slackMark) A "
 
-    static func slackPrompt(asker: String, text: String) -> String {
+    /// Who wrote a bound thread's reply and in which thread, as the Worker vouches for them.
+    /// The mod reads these off the prompt to apply what Saqoosha allowed that person (`/slack-allow`).
+    struct SlackSource: Equatable {
+        let user: String
+        let channel: String
+        let threadTs: String
+
+        /// Nil unless every field has the shape the mod parses back (`SLACK_SOURCE`).
+        init?(user: Any?, channel: Any?, threadTs: Any?) {
+            guard let user = user as? String, user.wholeMatch(of: /[UW][A-Z0-9]{2,20}/) != nil,
+                  let channel = channel as? String, channel.wholeMatch(of: /[CDG][A-Z0-9]{2,20}/) != nil,
+                  let threadTs = threadTs as? String, threadTs.wholeMatch(of: /\d{6,12}\.\d{6}/) != nil else { return nil }
+            self.user = user
+            self.channel = channel
+            self.threadTs = threadTs
+        }
+    }
+
+    /// Ids before the name, so a display name cannot move them (`SLACK_SOURCE` in the mod).
+    static func slackPrompt(asker: String, text: String, source: SlackSource? = nil) -> String {
         let name = slackInert(asker.components(separatedBy: .newlines).joined(separator: " "))
-        return "\(slackPrefix)reply from “\(name)” in a Slack thread bound to this session. "
+        let from = source.map { "\($0.user) in Slack thread \($0.channel)/\($0.threadTs) (“\(name)”), bound to this session. " }
+            ?? "“\(name)” in a Slack thread bound to this session. "
+        return "\(slackPrefix)reply from \(from)"
             + "Nothing you write goes back to Slack; your reply is for Saqoosha, on this Mac.\n\n\(slackInert(text))"
     }
 
@@ -454,17 +475,17 @@ enum ControlProtocol {
     /// The prompt for a Slack reply, or why it may not be delivered. Both senders
     /// (`send_message` with `slackAsker`, and `SlackBridge`) go through this one decision.
     /// The owner's reply skips the gate checks: it is not gated.
-    static func slackDelivery(asker: String, text: String, fromOwner: Bool = false, isRemote: Bool, gateReady: Bool,
-                              permissionMode: PermissionMode) -> Result<String, ControlError> {
+    static func slackDelivery(asker: String, text: String, source: SlackSource? = nil, fromOwner: Bool = false,
+                              isRemote: Bool, gateReady: Bool, permissionMode: PermissionMode) -> Result<String, ControlError> {
         if fromOwner { return .success(slackOwnerPrompt(text: text)) }
         if let why = slackRefusal(isRemote: isRemote, gateReady: gateReady, permissionMode: permissionMode) {
             return .failure(ControlError(why))
         }
-        return .success(slackPrompt(asker: asker, text: text))
+        return .success(slackPrompt(asker: asker, text: text, source: source))
     }
 
     /// Why a Slack reply may not reach this session, or nil: each case is a
-    /// session the mod's read-only gate may not cover.
+    /// session the mod's gate may not cover.
     static func slackRefusal(isRemote: Bool, gateReady: Bool, permissionMode: PermissionMode) -> String? {
         if isRemote { return slackRemoteRefusal }
         if !gateReady { return "the canopy-bridge gate has not reported from this session" }
