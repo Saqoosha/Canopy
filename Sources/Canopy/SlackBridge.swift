@@ -301,7 +301,8 @@ final class SlackBridge {
         guard let session = store.openSession(for: ControlProtocol.slackSessionRefs(sessionKey)), let shim = session.shim else {
             return failed("the session is not open on Saqoosha's Mac")
         }
-        switch ControlProtocol.slackDelivery(asker: author, text: text, fromOwner: message["owner"] as? Bool == true,
+        let source = ControlProtocol.SlackSource(user: message["user"], channel: message["channel"], threadTs: message["threadTs"])
+        switch ControlProtocol.slackDelivery(asker: author, text: text, source: source, fromOwner: message["owner"] as? Bool == true,
                                              isRemote: shim.remoteHost != nil, gateReady: shim.slackGateReady,
                                              permissionMode: shim.permissionMode) {
         case .failure(let why):

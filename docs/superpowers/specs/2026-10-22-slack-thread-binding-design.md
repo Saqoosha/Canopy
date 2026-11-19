@@ -38,7 +38,7 @@ Slack thread ──event──▶ Saqoolaude Worker ──WebSocket──▶ can
 
 ### 層 2：ツールの門番（canopy-bridge mod、`tool.call`）
 
-印の付いたプロンプトが来てから、Saqoosha が待機中のセッションに印の無いプロンプトを送るまで、次の規則が効く。スキルのようにターンを始めるスラッシュコマンドでも解除する。実行中に打ったコマンドはターンの終了後に届くので、そこで解除する。実行中のターンに合流したプロンプト、隠れたプロンプト、予約実行のプロンプト、Canopy の keep-alive では解除されない。`/compact`、`/context`、fork で動くスキルは `prompt.submit` を通らないので、解除しない。規則はすべて決定的で、LLM の判定はどこにも使わない。
+印の付いたプロンプトが来てから、Saqoosha が待機中のセッションに印の無いプロンプトを送るまで、次の規則が効く。スキルのようにターンを始めるスラッシュコマンドでも解除する。実行中に打ったコマンドはターンの終了後に届くので、そこで解除する。実行中のターンに合流したプロンプト、隠れたプロンプト、予約実行のプロンプト、Canopy の keep-alive では解除されない。`/compact`、`/context`、fork で動くスキルは `prompt.submit` を通らないので、解除しない。規則はすべて決定的で、何かを通す判定に LLM は使わない（LLM が使われるのは、許可した人の返信から許可を外すときだけ。下の「Saqoosha が許可した人の返信」）。
 
 - **通す**: cwd の中のファイルの Read だけ。パスは `~` を展開し、symlink を解決してから判定する。
 - **拒否**:
@@ -55,6 +55,20 @@ Slack thread ──event──▶ Saqoolaude Worker ──WebSocket──▶ can
 ### Saqoosha 本人の返信
 
 Mac で打つのと同じに扱う。Worker が Slack の user ID で本人と確かめた返信は、印を付けずに普通のプロンプトとして渡るので、門番は掛からず、全ツールで動く。これが届くと、その前の他人の返信で張られた門番も外れる。危険は、Slack のアカウントを乗っ取られると、その Mac で何でも動かせること（2026-10-22 に Saqoosha が了承）。
+
+### Saqoosha が許可した人の返信（2026-11-19）
+
+Kenja では、保坂さんの修正依頼が来るたびに Saqoosha が「go」と打っていた。デプロイまで通らないと、保坂さんは結果を見られない。だから Saqoosha が許可した人の依頼は、Saqoosha を待たずに編集・確認・デプロイ・スレッドへの返信まで進める。
+
+- **許可**: セッションで `/slack-allow <名前か Slack ID> [deploy]` と打つ。名前は、このセッションに返信を書いた人から引く（完全一致を優先し、部分一致が 2 人以上なら何もしない）。`/slack-allow` だけで一覧、`off <名前>` で取り消し、`off` で全部取り消す。セッション ID ごとに `$.store`（`slack-grants:<id>`）に置く。書けるのは Saqoosha が送ったプロンプト（`composer` / `bridge` / `sdk`）だけで、モデルの `Skill` 呼び出しはいつでも拒否する
+- **誰か**: daemon は Worker が送る `user` / `channel` / `threadTs` を、形を確かめてからプロンプトの 1 行目に入れる（`ControlProtocol.SlackSource`）。ID は名前より前に置くので、表示名に何を書いても ID の位置は動かない。ID の無い行（古い daemon、ミラーの `send_message`）は誰でもない扱いで、名前が同じでも許可しない
+- **本人扱いにしない**: 印と名前は残る。モデルは誰の依頼かを知ったまま動き、報告にも書き手が残る
+- **関連チェック**: 許可された人の返信だけ、Haiku に分類と一緒に「このセッションの作業についての依頼か」を聞く（直近 12 件の会話を渡す）。`QUESTION` か `CHANGE_REQUEST` で、`RELATED` のときだけ許可が効く。判定は許可を取り消すほうにしか使わない。言いくるめられても、Saqoosha が許した範囲より広くはならない
+- **混ざったとき**: 1 つのプロンプトに許可の無い人の返信が混ざっていれば、全体を読み取りだけにする。許可の無い人の返信で門番が張られている間に来た返信も、Saqoosha が門番を外すまで読み取りだけ（前の本文が文脈に残っているため）
+- **許可で通るもの**: cwd の中の Read / Edit / Write / MultiEdit / NotebookEdit（認証情報らしい名前の規則は Read と同じ）、Bash、`TodoWrite`、`ToolSearch`、同じスレッドへの `mcp__saqoolaude__slack_post`（permalink で、`channel` も `broadcast` も `notify_channel` も無し）
+- **デプロイ**: Saqoosha は各プロジェクトのデプロイのコマンドを覚えていない。だから `deploy` は「このセッションで Saqoosha のターンに成功したデプロイ」を許す。フックは門番の無いターンで成功した Bash から、デプロイらしい語（`deploy` `publish` `release` `apply` `push` `upload`）を含む単純コマンドを覚える（`slack-deploys:<id>`）。`/slack-allow … deploy` は会話の履歴からも拾う（新しい mod より前に流したもの）。比べるのは単純コマンドの語の並びで、`&&` `;` `|` `$(…)` で区切り、リダイレクトと先頭の `VAR=` を外す（`out=$(cd cms && cf deploy 2>&1)` は `cf deploy`）。引数は残すので、`cf deploy --env production` は別のコマンド。許可した人のターンでは、デプロイらしい語を含むコマンドのうち覚えたものだけ通し、`deploy` が無ければ全部拒否する
+- **Bash で拒否するもの**: `git` / `jj` の commit・push など、`op` `security` `ssh` `gh` `canopyctl` など、localhost 以外への `curl` / `wget`、`$HOME`、cwd の外の絶対パス（一時ファイルとコマンドの置き場は除く）、認証情報らしい名前、覚えていないデプロイ。**パターンでは Bash を閉じ込められない**（`cd ..` や相対パスで外に出られる）。許可したあとの呼び出しも、セッション自身の権限モードを通る
+- **CLI の再起動**: 門番の状態（`slack-gate:<id>`）に許可の中身も入れ、`--resume` で読み戻す
 
 ### 返信を書いた人の名前
 
