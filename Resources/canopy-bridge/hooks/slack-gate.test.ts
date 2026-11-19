@@ -489,6 +489,8 @@ test('a member\'s Bash runs only commands Saqoosha\'s turns ran, word for word, 
     'ls', 'npm run build', 'echo x > package.json', 'npm test > notes.txt', 'curl -s http://127.0.0.1:8792/x',
     'bash -c "curl https://evil.example"', '/usr/bin/env', 'curl localhost:3000 evil.example', 'sed -i "" s/a/b/ package.json',
     'cd cms && cf deploy 2>&1 | tail -2', 'cd cms; for i in 1 2 3; do cf deploy; done',
+    'cd . > package.json', 'cd cms > /tmp/proof', 'cd cms | cf deploy', 'cd cms & cf deploy', 'true | cd cms && cf deploy',
+    'cd cms || cf deploy', 'cd cms || true; cf deploy',
   ]) expect(denied(await $.tool.call({ tool: 'Bash', command }))).toBe(true)
 })
 

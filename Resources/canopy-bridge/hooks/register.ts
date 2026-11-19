@@ -365,7 +365,8 @@ function splitShell(line) {
   let quote = null
   let cur = ''
   let substituted = false
-  const cut = () => { out.push({ text: cur, substituted, depth: stack.length }); cur = ''; substituted = false }
+  let prev
+  const cut = next => { out.push({ text: cur, substituted, depth: stack.length, prev, next }); prev = next; cur = ''; substituted = false }
   for (let i = 0; i < line.length;) {
     const c = line[i]
     if (quote === "'") { if (c === "'") quote = null; cur += c; i++; continue }
@@ -381,7 +382,7 @@ function splitShell(line) {
     if (!op) { cur += c; continue }
     const top = stack.at(-1)
     if ((op === ')' && top?.closes === ')') || (op === '`' && top?.closes === '`')) {
-      cut()
+      cut(op)
       const outer = stack.pop()
       quote = outer.quote
       cur = `${outer.cur} $SUB `
@@ -391,9 +392,9 @@ function splitShell(line) {
       quote = null
       cur = ''
       substituted = false
-    } else cut()
+    } else cut(op)
   }
-  cut()
+  cut(undefined)
   return out
 }
 
@@ -406,7 +407,7 @@ function simpleCommands(command, cwd) {
   const commands = []
   // The folder at each depth: a `cd` inside `( … )` or `$( … )` ends with it.
   const dirs = [[]]
-  for (const { text: segment, substituted, depth } of splitShell(String(command))) {
+  for (const { text: segment, substituted, depth, prev, next } of splitShell(String(command))) {
     while (dirs.length <= depth) dirs.push([...dirs.at(-1)])
     dirs.length = depth + 1
     let dir = dirs[depth]
@@ -421,7 +422,11 @@ function simpleCommands(command, cwd) {
     }
     // A bare `( … )` group leaves only its placeholder: the commands inside are the ones that run.
     if (words.length === 0 || (words.length === 1 && words[0] === '$SUB' && !substituted)) continue
-    if (words[0] === 'cd' && dir[0] !== '?') {
+    // A `cd` in a pipeline or sent to the background runs in a subshell and moves nothing; after
+    // `||` the folder depends on whether it failed.
+    const scoped = next === '|' || next === '&' || prev === '|' || prev === '&'
+    if (words[0] === 'cd' && next === '||') dir = ['?']
+    else if (words[0] === 'cd' && dir[0] !== '?' && !scoped) {
       const to = words[1] ?? ''
       const below = to.startsWith('/') && cwd ? inside(cwd, absolute('/', to, '')) : undefined
       if (below !== undefined) dir = below ? below.split('/') : []
@@ -432,8 +437,9 @@ function simpleCommands(command, cwd) {
       }
     }
     dirs[depth] = dir
-    // A `cd` only moves; where it moved to is the folder the next commands carry.
-    if (words[0] === 'cd' && dir[0] !== '?') continue
+    // A plain `cd <folder>` only moves, and where it moved to is the folder the next commands
+    // carry. One with more (a redirection that writes a file) is compared like any command.
+    if (words[0] === 'cd' && words.length <= 2 && dir[0] !== '?') continue
     commands.push({ key: `${dir.join('/') || '.'}\t${words.join(' ')}`, words, dir, substituted })
   }
   return commands
