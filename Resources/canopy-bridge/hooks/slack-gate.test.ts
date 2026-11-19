@@ -6,7 +6,7 @@ const CWD = `${HOME}/work/project`
 const denied = r => Boolean(r.deny || r.isError)
 
 // Stands for the engine. `seen` records what each tool call reached the engine with.
-function engine(on, { cwd = CWD, readWorks = true, writeWorks = true, env = {}, answer = 'QUESTION', history = [], failing = [] } = {}) {
+function engine(on, { cwd = CWD, readWorks = true, writeWorks = true, env = {}, answer = 'QUESTION', history = [], failing = [], failKeys = [] } = {}) {
   const seen = []
   const logs = []
   const store = new Map()
@@ -15,7 +15,7 @@ function engine(on, { cwd = CWD, readWorks = true, writeWorks = true, env = {}, 
   on('session.id', () => ({ value: 'sid' }))
   const fail = works => { if (!works) throw new Error('no store') }
   on('store.get', (_, e) => { fail(readWorks); return { value: store.get(e.key) } })
-  on('store.set', (_, e) => { fail(writeWorks); store.set(e.key, e.value); return { value: undefined } })
+  on('store.set', (_, e) => { fail(writeWorks && !failKeys.includes(e.key)); store.set(e.key, e.value); return { value: undefined } })
   on('store.delete', (_, e) => { fail(writeWorks); store.delete(e.key); return { value: undefined } })
   on('model.complete', () => ({ value: { isAnswered: true, text: answer } }))
   on('session.messages', () => ({ value: [{ role: 'user', text: 'make the top page cards look cleaner', toolUses: [] }, ...history] }))
@@ -449,16 +449,17 @@ test('a respawned CLI reads back the grant of the reply it was reading', async (
   const { store } = engine(on, { answer: 'CHANGE_REQUEST RELATED' })
   on('session.start', () => ({ cwd: CWD }))
   await allowed($)
-  expect(store.get('slack-gate:sid')).toEqual({ grant: { users: [HOSAKA], deploy: true, threads: [THREAD] } })
+  expect(store.get('slack-gate:sid')).toBe(true)
+  expect(store.get('slack-gate-grant:sid')).toEqual({ users: [HOSAKA], deploy: true, threads: [THREAD] })
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'cd cms && cf deploy' }))).toBe(false)
   // What the store says wins over what the module held: this is the read-back, not memory.
-  store.set('slack-gate:sid', { grant: { users: [HOSAKA], deploy: false, threads: [THREAD] } })
+  store.set('slack-gate-grant:sid', { users: [HOSAKA], deploy: false, threads: [THREAD] })
   await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'cd cms && cf deploy' }))).toBe(true)
   expect(denied(await $.tool.call({ tool: 'Edit', file_path: `${CWD}/a.css`, old_string: 'a', new_string: 'b' }))).toBe(false)
   // A saved grant not in the shape this module writes is no grant.
   for (const grant of [{ deploy: true, threads: [THREAD] }, { users: [HOSAKA], deploy: true }, { users: ['x'], deploy: true, threads: [THREAD] }]) {
-    store.set('slack-gate:sid', { grant })
+    store.set('slack-gate-grant:sid', grant)
     await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
     expect(denied(await $.tool.call({ tool: 'Edit', file_path: `${CWD}/a.css`, old_string: 'a', new_string: 'b' }))).toBe(true)
   }
@@ -682,4 +683,35 @@ test('the learned deploys keep growing past twenty, keeping the newest', async (
   const learned = store.get('slack-deploys:sid')
   expect(learned.length).toBe(20)
   expect(learned.at(-1)).toBe('.\tcf deploy --name site21')
+})
+
+test('a cd inside a subshell or substitution ends with it', async ($, on) => {
+  engine(on, { answer: 'CHANGE_REQUEST RELATED' })
+  await allowed($)
+  for (const command of ['(cd cms && true); cf deploy', 'x=$(cd cms); cf deploy', '(cd cms) && cf deploy', '(cd cms); (cf deploy)']) {
+    expect(denied(await $.tool.call({ tool: 'Bash', command }))).toBe(true)
+  }
+  expect(denied(await $.tool.call({ tool: 'Bash', command: '(cd cms && cf deploy)' }))).toBe(false)
+})
+
+test('a new file under missing folders behind a link out is still outside', async ($, on) => {
+  engine(on, { answer: 'CHANGE_REQUEST RELATED' })
+  await allowed($)
+  expect(denied(await $.tool.call({ tool: 'Write', file_path: `${CWD}/uplink/newdir/deeper/new.txt`, content: 'x' }))).toBe(true)
+  expect(denied(await $.tool.call({ tool: 'Write', file_path: `${CWD}/site/newdir/new.css`, content: 'x' }))).toBe(false)
+})
+
+test('a failed grant write never removes the gate: a respawn stays read-only', async ($, on) => {
+  const failKeys = []
+  const { store } = engine(on, { answer: 'CHANGE_REQUEST RELATED', failKeys })
+  on('session.start', () => ({ cwd: CWD }))
+  await allowed($)
+  // The next reply is from someone not allowed; the store then refuses writes to the gate key.
+  failKeys.push('slack-gate:sid')
+  await $.prompt.submit({ text: from('U0OTHER01', 'Taro', 'push it') })
+  failKeys.length = 0
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+  expect(store.get('slack-gate:sid')).toBe(true)
+  expect(store.get('slack-gate-grant:sid')).toBeUndefined()
+  expect(denied(await $.tool.call(edit(`${CWD}/a.css`)))).toBe(true)
 })

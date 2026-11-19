@@ -63,12 +63,17 @@ async function slackKey($) {
   return `slack-gate:${await $.session.id()}`
 }
 
+// The grant lives under its own key: dropping it is one delete, and the gate key stays `true`
+// whatever happens to the grant, so a failed write can never remove the gate itself.
+async function grantKey($) {
+  return `slack-gate-grant:${await $.session.id()}`
+}
+
 async function restoreSlackGate($) {
   try {
-    const saved = await $.store.get(await slackKey($))
-    if (saved) {
+    if (await $.store.get(await slackKey($))) {
       slackQuestion = true
-      slackGrant = savedGrant(saved.grant)
+      slackGrant = savedGrant(await $.store.get(await grantKey($)))
     }
   } catch (err) {
     slackQuestion = true
@@ -78,13 +83,17 @@ async function restoreSlackGate($) {
 }
 
 async function saveSlackGate($) {
+  // The grant first: once it is gone, whatever fails after leaves no more than read-only.
+  try {
+    await (slackGrant && slackQuestion !== undefined ? $.store.set(await grantKey($), slackGrant) : $.store.delete(await grantKey($)))
+  } catch (err) {
+    slackLog($, { failed: `grant write: ${String(err)}` })
+  }
   try {
     const key = await slackKey($)
-    await (slackQuestion === undefined ? $.store.delete(key) : $.store.set(key, slackGrant ? { grant: slackGrant } : true))
+    await (slackQuestion === undefined ? $.store.delete(key) : $.store.set(key, true))
   } catch (err) {
     slackLog($, { failed: `write: ${String(err)}` })
-    // A stale `{ grant }` left behind would come back after a respawn: remove it if we can.
-    if (slackQuestion !== undefined) await $.store.delete(await slackKey($)).catch(() => {})
   }
 }
 
@@ -148,14 +157,15 @@ async function resolved($, path) {
   return r.exitCode === 0 ? r.stdout.trim() : path
 }
 
-// For a file that may not exist yet: its folder resolved, then the name, so a link to a
-// folder outside cannot carry a new file out.
+// For a file that may not exist yet: the nearest folder above it that exists, resolved, then
+// the rest, so a link to a folder outside cannot carry new files out.
 async function resolvedForWrite($, path) {
-  const r = await $.process.run(['/bin/realpath', path], { cwd: '/' })
-  if (r.exitCode === 0) return r.stdout.trim()
-  const slash = path.lastIndexOf('/')
-  const parent = await $.process.run(['/bin/realpath', path.slice(0, slash) || '/'], { cwd: '/' })
-  return parent.exitCode === 0 ? `${parent.stdout.trim()}/${path.slice(slash + 1)}` : path
+  const parts = path.split('/')
+  for (let n = parts.length; n > 1; n--) {
+    const r = await $.process.run(['/bin/realpath', parts.slice(0, n).join('/') || '/'], { cwd: '/' })
+    if (r.exitCode === 0) return [r.stdout.trim(), ...parts.slice(n)].join('/')
+  }
+  return path
 }
 
 // The folder Slack replies may read, resolved, or why there is none. The gate and the
@@ -349,7 +359,7 @@ function splitShell(line) {
   let quote = null
   let cur = ''
   let substituted = false
-  const cut = () => { out.push({ text: cur, substituted }); cur = ''; substituted = false }
+  const cut = () => { out.push({ text: cur, substituted, depth: stack.length }); cur = ''; substituted = false }
   for (let i = 0; i < line.length;) {
     const c = line[i]
     if (quote === "'") { if (c === "'") quote = null; cur += c; i++; continue }
@@ -385,9 +395,13 @@ function splitShell(line) {
 // assignments and arguments stay: `X=prod cf deploy` and `--env production` are other targets.
 function simpleCommands(command) {
   const commands = []
-  let dir = []
+  // The folder at each depth: a `cd` inside `( … )` or `$( … )` ends with it.
+  const dirs = [[]]
   const parts = splitShell(String(command).replace(/\d*[<>]&\d+/g, ' ').replace(/&>/g, ' > '))
-  for (const { text: segment, substituted } of parts) {
+  for (const { text: segment, substituted, depth } of parts) {
+    while (dirs.length <= depth) dirs.push([...dirs.at(-1)])
+    dirs.length = depth + 1
+    let dir = dirs[depth]
     const words = []
     let skipNext = false
     for (const raw of segment.trim().split(/\s+/)) {
@@ -408,6 +422,7 @@ function simpleCommands(command) {
         else if (part && part !== '.') dir = [...dir, part]
       }
     }
+    dirs[depth] = dir
     commands.push({ words, dir: dir.join('/') || '.', substituted })
   }
   return commands
