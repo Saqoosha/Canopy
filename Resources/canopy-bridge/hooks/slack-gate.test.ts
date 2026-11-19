@@ -720,7 +720,7 @@ test('a failed grant write never removes the gate: a respawn stays read-only', a
   failKeys.length = 0
   await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
   expect(store.get('slack-gate:sid')).toBe(true)
-  expect(store.get('slack-gate-grant:sid')).toBeUndefined()
+  expect(store.get('slack-gate-grant:sid')).toBe('held')
   expect(denied(await $.tool.call(edit(`${CWD}/a.css`)))).toBe(true)
 })
 
@@ -766,4 +766,27 @@ test('quoting is part of the command: printing a redirection is not making it', 
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'echo x > package.json' }))).toBe(true)
   expect(denied(await $.tool.call({ tool: 'Bash', command: "echo 'x > package.json'" }))).toBe(false)
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'echo "$out" | tail -2' }))).toBe(false)
+})
+
+test('a command learned outside the session folder is never repeated', async ($, on) => {
+  engine(on, { answer: 'CHANGE_REQUEST RELATED' })
+  await allowed($, '保坂', ['cd ../other && npm test'])
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'cd ../other && npm test' }))).toBe(true)
+})
+
+test('a failed held write leaves the gate held after a respawn', async ($, on) => {
+  const failKeys = []
+  const { store } = engine(on, { answer: 'CHANGE_REQUEST RELATED', failKeys })
+  on('session.start', () => ({ cwd: CWD }))
+  await allowed($)
+  failKeys.push('slack-gate:sid')
+  await $.prompt.submit({ text: from('U0OTHER01', 'Taro', 'push it') })
+  failKeys.length = 0
+  // The gate key still says `true`; the grant key carries the hold.
+  expect(store.get('slack-gate:sid')).toBe(true)
+  expect(store.get('slack-gate-grant:sid')).toBe('held')
+  await $.session.start({ cwd: CWD, surface: 'desktop', isInteractive: true })
+  await $.prompt.submit({ text: 'build finished', origin: { kind: 'task-notification' } })
+  await $.prompt.submit({ text: hosaka })
+  expect(denied(await $.tool.call(edit(`${CWD}/a.css`)))).toBe(true)
 })
