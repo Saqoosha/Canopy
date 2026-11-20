@@ -16520,6 +16520,61 @@ enum SidebarLogicProbe {
                    same(ShimProcess.addingSessionIfMissing(other, id: "moved") { entry }, other))
         }
 
+        // Held-message notice: which directory's settings.json, and the bytes written when it is missing.
+        do {
+            let fm = FileManager.default
+            let root = fm.temporaryDirectory.appendingPathComponent("canopy-user-settings-\(UUID().uuidString)")
+            defer { try? fm.removeItem(at: root) }
+            let account = root.appendingPathComponent("acct").path
+            let inherited = root.appendingPathComponent("inherited").path
+            let home = root.appendingPathComponent("home").path
+            let fallback = URL(fileURLWithPath: home, isDirectory: true).appendingPathComponent(".claude").path
+            record("user settings dir: the session account wins over an inherited CLAUDE_CONFIG_DIR",
+                   ShimProcess.claudeUserConfigDir(accountConfigDir: account, inherited: inherited, home: home) == account)
+            record("user settings dir: inherited CLAUDE_CONFIG_DIR when the session has no account",
+                   ShimProcess.claudeUserConfigDir(accountConfigDir: nil, inherited: inherited, home: home) == inherited)
+            record("user settings dir: empty account and empty inherited fall through to ~/.claude",
+                   ShimProcess.claudeUserConfigDir(accountConfigDir: "", inherited: "", home: home) == fallback)
+            record("user settings dir: a whitespace inherited value is kept",
+                   ShimProcess.claudeUserConfigDir(accountConfigDir: nil, inherited: "  ", home: home) == "  ")
+
+            let created = ShimProcess.ensureClaudeUserSettingsFile(in: account)
+            let createdBody = try? Data(contentsOf: created)
+            record("user settings file: a missing settings.json is created in a new directory",
+                   created.lastPathComponent == "settings.json"
+                       && createdBody == ShimProcess.emptyClaudeUserSettings
+                       && fm.fileExists(atPath: account))
+            record("user settings file: the created bytes are the extension's empty object",
+                   ShimProcess.emptyClaudeUserSettings == Data("{}\n".utf8))
+            try Data("keep-me".utf8).write(to: created)
+            let again = ShimProcess.ensureClaudeUserSettingsFile(in: account)
+            record("user settings file: an existing settings.json is not rewritten",
+                   again.path == created.path && (try? Data(contentsOf: again)) == Data("keep-me".utf8))
+
+            let linkDir = root.appendingPathComponent("linked", isDirectory: true)
+            try fm.createDirectory(at: linkDir, withIntermediateDirectories: true)
+            let target = root.appendingPathComponent("shared.json")
+            try Data("shared".utf8).write(to: target)
+            let link = linkDir.appendingPathComponent("settings.json")
+            try fm.createSymbolicLink(atPath: link.path, withDestinationPath: target.path)
+            let linked = ShimProcess.ensureClaudeUserSettingsFile(in: linkDir.path)
+            record("user settings file: a symlink is left in place and its target is not rewritten",
+                   (try? fm.destinationOfSymbolicLink(atPath: linked.path)) == target.path
+                       && (try? Data(contentsOf: target)) == Data("shared".utf8))
+
+            let danglingDir = root.appendingPathComponent("dangling", isDirectory: true)
+            try fm.createDirectory(at: danglingDir, withIntermediateDirectories: true)
+            let danglingTarget = root.appendingPathComponent("missing-target.json").path
+            let dangling = danglingDir.appendingPathComponent("settings.json")
+            try fm.createSymbolicLink(atPath: dangling.path, withDestinationPath: danglingTarget)
+            let kept = ShimProcess.ensureClaudeUserSettingsFile(in: danglingDir.path)
+            record("user settings file: a dangling symlink is not replaced",
+                   (try? fm.destinationOfSymbolicLink(atPath: kept.path)) == danglingTarget
+                       && !fm.fileExists(atPath: kept.path))
+        } catch {
+            record("user settings file: setup failed", false, "\(error)")
+        }
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)

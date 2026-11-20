@@ -12,3 +12,4 @@ Condensed from CLAUDE.md. Full original text: `git show 3b6a198:CLAUDE.md`.
 - **`canopyAssignedEnvKeys` is an explicit list, not a `CANOPY_*` prefix sweep** — a sweep would drop dev overrides like `CANOPY_CJK_DEBUG`. It is scrubbed in BOTH spawners (`ShimProcess`, `RemoteSessionsBridge`).
 - **SSH patches in `index.js`**: `realpathSync` tolerates `ENOENT`; `spawn` rewrites a missing `cwd` to `$HOME` only for `CANOPY_SSH_WRAPPER_PATH` commands (others must fail cleanly). Per-session config goes through `envOverrides` in `workspace.js`, not the shared settings file.
 - **`OutputChannel.show()` sends `show_document` from a per-channel ring** — see the comment above `OUTPUT_CHANNEL_MAX_LINES` in `window.js`.
+- **`open_user_settings_file` is handled in `ShimProcess`** (`handleOpenUserSettingsFile`), and opens in the default editor. `showTextDocument` / `openTextDocument` now read `file:` Uris, which also changes the extension's other `openFile` and diff paths.

@@ -4052,6 +4052,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 handleOpenContent(request, requestId: dict["requestId"] as? String)
                 return
             }
+            if reqType == "open_user_settings_file" {
+                handleOpenUserSettingsFile(requestId: dict["requestId"] as? String)
+                return
+            }
 
             // The extension still generates its own in-session title; Canopy
             // no longer consumes the result (see `applyTitleFromResponse`), so
@@ -5017,10 +5021,73 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                             projectDirs: [checkouts.main].compactMap { $0 } + checkouts.linked)
     }
 
+    /// The directory for `open_user_settings_file`: the extension's `gg()`, i.e. `CLAUDE_CONFIG_DIR`
+    /// (the account's wins; empty is absent) or `~/.claude`. Not modelled: the handler's `Fn()` first
+    /// prefers a config home moved via `claude auth status`.
+    static func claudeUserConfigDir(accountConfigDir: String?, inherited: String?, home: String) -> String {
+        if let accountConfigDir, !accountConfigDir.isEmpty { return accountConfigDir }
+        if let inherited, !inherited.isEmpty { return inherited }
+        return URL(fileURLWithPath: home, isDirectory: true).appendingPathComponent(".claude").path
+    }
+
+    /// Bytes the extension writes when that file is missing. `X9(path, {})`
+    /// in 2.1.329 is `JSON.stringify({}, null, 2) + "\n"`, and an empty
+    /// object stringifies to `{}`.
+    static let emptyClaudeUserSettings = Data("{}\n".utf8)
+
+    /// Creates `settings.json` in `configDir` when nothing is there yet,
+    /// creating `configDir` too. An existing file is left byte for byte, and
+    /// so is a symlink, dangling or not: an account dir's `settings.json` is
+    /// often a link to the default login's, and replacing it would split them.
+    static func ensureClaudeUserSettingsFile(in configDir: String, fileManager: FileManager = .default) -> URL {
+        let file = URL(fileURLWithPath: configDir, isDirectory: true).appendingPathComponent("settings.json")
+        if fileManager.fileExists(atPath: file.path) { return file }
+        if (try? fileManager.destinationOfSymbolicLink(atPath: file.path)) != nil { return file }
+        do {
+            try fileManager.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if !fileManager.fileExists(atPath: file.path),
+               (try? fileManager.destinationOfSymbolicLink(atPath: file.path)) == nil {
+                try Self.emptyClaudeUserSettings.write(to: file, options: .atomic)
+            }
+        } catch {
+            logger.error("ensureClaudeUserSettingsFile: \(file.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+        return file
+    }
+
+    /// The held-message notice's link. Handled here, like `open_file`, so a mirror's click lands on the
+    /// Mac that clicked (`show_document` has no request id). The path is computed here, never taken from
+    /// the webview. A click on this Mac opens the default editor (the notice asks for an edit; ContentViewer
+    /// is read-only); another Mac's click keeps `open_file`'s routing to that Mac.
+    private func handleOpenUserSettingsFile(requestId: String?) {
+        let dir = Self.claudeUserConfigDir(
+            accountConfigDir: claudeAccount?.configDir,
+            inherited: ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"],
+            home: FileManager.default.homeDirectoryForCurrentUser.path)
+        let file = Self.ensureClaudeUserSettingsFile(in: dir)
+        var clickedElsewhere = false
+        if let requestId, case .mirror(let key)? = requestOwners[requestId], mirrors[key]?.sink?.isLocalClient != true {
+            clickedElsewhere = true
+        }
+        logger.notice("open_user_settings_file: \(file.path, privacy: .public) remote=\(clickedElsewhere, privacy: .public)")
+        handleOpenFile(
+            ["filePath": file.path, "openExternal": !clickedElsewhere],
+            requestId: requestId,
+            responseType: "open_user_settings_file_response",
+            enforcingAllowlist: false)
+    }
+
     /// Handle open_file request from webview. By default shows the file in ContentViewer
     /// instead of forwarding to extension (which triggers file:// navigation → WebContent crash).
-    /// When `openExternal` is true (set by Cmd-click), opens in the macOS default app.
-    private func handleOpenFile(_ request: [String: Any], requestId: String?) {
+    /// When `openExternal` is true (Cmd-click, or the settings link on this Mac), opens in the macOS default app.
+    ///
+    /// `responseType` and `enforcingAllowlist: false` are for `handleOpenUserSettingsFile` only.
+    private func handleOpenFile(
+        _ request: [String: Any],
+        requestId: String?,
+        responseType: String = "open_file_response",
+        enforcingAllowlist: Bool = true
+    ) {
         let location = request["location"] as? [String: Any]
         let openExternal = request["openExternal"] as? Bool == true
 
@@ -5043,18 +5110,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             } else {
                 url = workingDirectory.appendingPathComponent(filePath)
             }
-            // Resolve symlinks and ensure the file is in this session's repository (prevent path traversal)
+            // Resolve symlinks and, unless told not to, ensure the file is in this session's repository
             let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
-            guard isOpenFileAllowed(resolved) else {
-                logger.warning("handleOpenFile: path traversal blocked: \(resolved.path, privacy: .public)")
-                if let requestId {
-                    sendToWebView([
-                        "type": "response",
-                        "requestId": requestId,
-                        "response": ["type": "open_file_response"] as [String: Any],
-                    ] as [String: Any])
+            if enforcingAllowlist {
+                guard isOpenFileAllowed(resolved) else {
+                    logger.warning("handleOpenFile: path traversal blocked: \(resolved.path, privacy: .public)")
+                    if let requestId {
+                        sendToWebView([
+                            "type": "response",
+                            "requestId": requestId,
+                            "response": ["type": responseType] as [String: Any],
+                        ] as [String: Any])
+                    }
+                    return
                 }
-                return
             }
             if FileManager.default.fileExists(atPath: resolved.path) {
                 // The daemon has no ContentViewer of its own: a text file goes to the Mac that asked.
@@ -5069,7 +5138,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                         sendToWebView([
                             "type": "response",
                             "requestId": requestId,
-                            "response": ["type": "open_file_response"] as [String: Any],
+                            "response": ["type": responseType] as [String: Any],
                         ] as [String: Any])
                     }
                     return
@@ -5089,7 +5158,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                     sendToWebView([
                         "type": "response",
                         "requestId": requestId,
-                        "response": ["type": "open_file_response"] as [String: Any],
+                        "response": ["type": responseType] as [String: Any],
                     ] as [String: Any])
                     return
                 }
@@ -5131,7 +5200,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             sendToWebView([
                 "type": "response",
                 "requestId": requestId,
-                "response": ["type": "open_file_response"] as [String: Any],
+                "response": ["type": responseType] as [String: Any],
             ] as [String: Any])
         }
     }

@@ -5,7 +5,9 @@ const {
   EventEmitter,
   Disposable,
   CancellationTokenNone,
+  Uri,
 } = require("./types.js");
+const { readFileTextDocument } = require("./workspace.js");
 const { createNotificationHandler } = require("./notifications.js");
 const { createEmphasisRepairer } = require("./cjk-emphasis-stream.js");
 
@@ -283,15 +285,32 @@ function createWindow() {
     },
 
     // -- showTextDocument ---------------------------------------------------
+    //
+    // A `file:` Uri is read from disk (`openFile` passes `Uri.file(path)`); a read failure rejects.
 
     showTextDocument(doc, _options) {
+      let shown = doc;
+      if (!(doc && typeof doc.getText === "function") && doc instanceof Uri && doc.scheme === "file") {
+        try {
+          shown = readFileTextDocument(doc.fsPath);
+        } catch (err) {
+          return Promise.reject(err);
+        }
+      }
+      const hasText = shown && typeof shown.getText === "function";
       writeStdout({
         type: "show_document",
-        content: typeof doc.getText === "function" ? doc.getText() : "",
-        fileName: doc.fileName || (doc.uri && doc.uri.fsPath) || "untitled",
-        languageId: doc.languageId || "plaintext",
+        content: hasText ? shown.getText() : "",
+        fileName: (shown && (shown.fileName || (shown.uri && shown.uri.fsPath))) || "untitled",
+        languageId: (shown && shown.languageId) || "plaintext",
       });
-      return Promise.resolve({});
+      if (!hasText) return Promise.resolve({});
+      // `openFile` reads `document` and calls `revealRange` after showing; both must exist.
+      return Promise.resolve({
+        document: shown,
+        revealRange() {},
+        selection: null,
+      });
     },
 
     // -- Tier 2 stubs -------------------------------------------------------

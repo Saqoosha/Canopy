@@ -372,11 +372,131 @@ function createConfiguration(settingsPath, extensionPackageJson, canopySettingsP
 }
 
 // ---------------------------------------------------------------------------
-// openTextDocument
+// openTextDocument / file-backed documents
 // ---------------------------------------------------------------------------
 
+// Keep equal to `MirrorUIFrame.maxInlineContentBytes`.
+const SHOW_DOCUMENT_MAX_BYTES = 2 << 20;
+const SHOW_DOCUMENT_TRUNCATION_NOTE =
+  "\n\n… truncated (file is larger than the viewer will send)";
+
+function languageIdForPath(filePath) {
+  switch (path.extname(filePath).toLowerCase()) {
+    case ".json":
+      return "json";
+    case ".md":
+    case ".markdown":
+      return "markdown";
+    case ".js":
+    case ".mjs":
+    case ".cjs":
+      return "javascript";
+    case ".jsx":
+      return "javascriptreact";
+    case ".ts":
+    case ".mts":
+    case ".cts":
+      return "typescript";
+    case ".tsx":
+      return "typescriptreact";
+    case ".py":
+      return "python";
+    case ".swift":
+      return "swift";
+    case ".html":
+      return "html";
+    case ".css":
+      return "css";
+    case ".sh":
+      return "shellscript";
+    case ".yml":
+    case ".yaml":
+      return "yaml";
+    case ".toml":
+      return "toml";
+    default:
+      return "plaintext";
+  }
+}
+
+// Longest prefix of `text` whose UTF-8 length is at most `maxBytes`. A prefix can end on the high
+// half of a surrogate pair; drop it so JSON.stringify does not emit a lone `\ud83d`.
+function headUtf8(text, maxBytes) {
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  let lo = 0;
+  let hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (Buffer.byteLength(text.slice(0, mid)) <= maxBytes) lo = mid;
+    else hi = mid - 1;
+  }
+  if (lo > 0) {
+    const unit = text.charCodeAt(lo - 1);
+    if (unit >= 0xD800 && unit <= 0xDBFF) lo -= 1;
+  }
+  return text.slice(0, lo);
+}
+
+function positionAt(content, offset) {
+  const clamped = Math.max(0, Math.min(offset | 0, content.length));
+  const head = content.slice(0, clamped);
+  const lineBreak = head.lastIndexOf("\n");
+  return { line: head.split("\n").length - 1, character: clamped - (lineBreak + 1) };
+}
+
+/**
+ * A TextDocument for a file on disk, with the `getText` / `positionAt` that `openFile` reads.
+ * A NUL byte is refused: a binary dump is not a document.
+ */
+function readFileTextDocument(filePath) {
+  const buf = fs.readFileSync(filePath);
+  if (buf.includes(0)) {
+    const err = new Error(`file is not UTF-8 text: ${filePath}`);
+    err.code = "EUTF8";
+    throw err;
+  }
+  let content = buf.toString("utf8");
+  if (Buffer.byteLength(content) > SHOW_DOCUMENT_MAX_BYTES) {
+    content = headUtf8(content, SHOW_DOCUMENT_MAX_BYTES) + SHOW_DOCUMENT_TRUNCATION_NOTE;
+  }
+  const uri = Uri.file(filePath);
+  return {
+    getText() {
+      return content;
+    },
+    languageId: languageIdForPath(filePath),
+    uri,
+    fileName: uri.fsPath,
+    isUntitled: false,
+    version: 1,
+    lineCount: content.split("\n").length,
+    positionAt(offset) {
+      return positionAt(content, offset);
+    },
+  };
+}
+
+function openFileTextDocument(filePath) {
+  try {
+    return Promise.resolve(readFileTextDocument(filePath));
+  } catch (err) {
+    return Promise.reject(err);
+  }
+}
+
 function openTextDocument(uriOrOptions) {
-  if (uriOrOptions && typeof uriOrOptions === "object" && !(uriOrOptions instanceof Uri)) {
+  if (typeof uriOrOptions === "string") {
+    return openFileTextDocument(uriOrOptions);
+  }
+  if (uriOrOptions instanceof Uri) {
+    // `untitled:` is how the extension opens a save-as buffer. Reading that
+    // path off disk would show whatever file happens to be there.
+    if (uriOrOptions.scheme !== "file") {
+      return Promise.reject(new Error("not implemented"));
+    }
+    return openFileTextDocument(uriOrOptions.fsPath);
+  }
+  if (uriOrOptions && typeof uriOrOptions === "object") {
     // { content, language } form — virtual document
     const content = uriOrOptions.content || "";
     const language = uriOrOptions.language || "plaintext";
@@ -392,7 +512,6 @@ function openTextDocument(uriOrOptions) {
       lineCount: content.split("\n").length,
     });
   }
-  // URI form — not implemented
   return Promise.reject(new Error("not implemented"));
 }
 
@@ -506,4 +625,10 @@ function createWorkspace({ cwd, settingsPath, extensionPackageJson, canopySettin
   };
 }
 
-module.exports = { createWorkspace, loadJson };
+module.exports = {
+  createWorkspace,
+  loadJson,
+  readFileTextDocument,
+  SHOW_DOCUMENT_MAX_BYTES,
+  SHOW_DOCUMENT_TRUNCATION_NOTE,
+};
