@@ -944,17 +944,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Double-click the header to rename, for the same
             // reason the close X is hit-tested here rather than by
             // SwiftUI: no mouse event reaches what that strip draws.
-            // Consumed ONLY when a sheet actually opened, so the
-            // click can still zoom the window otherwise — a launcher
-            // pane has no session to name, and consuming there would
-            // both fail to rename and swallow the zoom, leaving a
-            // gesture that does nothing at all.
+            // Consumed ONLY when a sheet actually opened.
             // Ordered after the close X so the X keeps the smaller,
             // more specific target.
-            // Only the header's lower band, below the title bar: a
-            // double-click in the title bar, or on the window's top
-            // resize edge (which reaches here with a NEGATIVE y), is the
-            // system's — zoom, or snapping the edge to the screen top.
+            // Only the header's lower band: the title-bar band's
+            // double-click is the title-bar action (below), and the
+            // window's top resize edge (which reaches here with a
+            // NEGATIVE y) snaps that edge to the screen top.
             let titleBarHeight: CGFloat = 28
             if event.clickCount == 2,
                clickYFromTop > titleBarHeight, clickYFromTop < PaneHeaderStrip.height,
@@ -1000,15 +996,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if event.clickCount == 1,
                Self.headerPressIsUnhandledChrome(event, yFromTop: clickYFromTop),
                let window = event.window {
-                if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
+                // Cmd-drag moves a background window without raising it.
+                if !window.isKeyWindow, !event.modifierFlags.contains(.command) {
+                    window.makeKeyAndOrderFront(nil)
+                }
                 window.performDrag(with: event)
                 return nil
             }
             // The title-bar double-click, which AppKit does not perform here
-            // for the same reason it does not drag. Any header band: a
-            // lower-band double-click that did not rename (a launcher pane)
-            // would otherwise do nothing.
-            if event.clickCount == 2,
+            // for the same reason it does not drag. Title-bar band only: the
+            // lower band belongs to rename.
+            if event.clickCount == 2, clickYFromTop <= titleBarHeight,
                Self.headerPressIsUnhandledChrome(event, yFromTop: clickYFromTop),
                let window = event.window {
                 Self.performTitleBarDoubleClick(on: window)
@@ -1024,13 +1022,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `applicationDidFinishLaunching`. Its
         // sibling `installKeyTypingMonitor` has warned about this for a
         // while; this one now has more to lose — a nil here silently takes
-        // out pane focus by click, the close X, header rename, AND one of the
+        // out pane focus by click, the close X, header rename, header window drag and double-click, AND one of the
         // two mouse gestures that acknowledge an unread mark on an
         // already-focused pane. The other three routes survive it: typing,
         // the pad key, and a click on that session's sidebar row, which
         // reaches the controller through SwiftUI rather than this monitor.
         if paneFocusClickMonitor == nil {
-            logger.warning("installPaneFocusClickMonitor: addLocalMonitorForEvents returned nil — pane focus by click, the close X, header rename, and acknowledging a MacroPad unread mark by clicking its pane are all dead (typing, the pad key, and clicking its sidebar row still acknowledge)")
+            logger.warning("installPaneFocusClickMonitor: addLocalMonitorForEvents returned nil — pane focus by click, the close X, header rename, header window drag and double-click, and acknowledging a MacroPad unread mark by clicking its pane are all dead (typing, the pad key, and clicking its sidebar row still acknowledge)")
         }
     }
 
