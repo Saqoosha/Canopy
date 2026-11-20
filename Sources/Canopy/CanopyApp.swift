@@ -793,6 +793,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return nil
     }
 
+    /// Whether a press in a pane header is one AppKit will not handle as
+    /// title-bar chrome, so the monitor must: the window drag, and the
+    /// title-bar double-click.
+    ///
+    /// True when the view under the press lies inside the content view. With
+    /// a session pane open, dragging its header moved nothing, at y 12 and
+    /// y 38, although the hit view (an `NSHostingView`) answered
+    /// `mouseDownCanMoveWindow == true` (measured 2026-11-20), so that
+    /// property cannot pick out the presses AppKit will not drag. A press
+    /// whose hit view lies outside the content view — the traffic lights,
+    /// the frame's resize edge (`NSThemeFrame` at y 1, measured) — is left
+    /// to AppKit.
+    private static func headerPressIsUnhandledChrome(_ event: NSEvent, yFromTop: CGFloat) -> Bool {
+        guard yFromTop >= 0, yFromTop < PaneHeaderStrip.height,
+              let content = event.window?.contentView,
+              let frameView = content.superview,
+              // hitTest takes superview coordinates; the frame view has
+              // none, so that is window coordinates.
+              let hit = frameView.hitTest(event.locationInWindow) else { return false }
+        return hit.isDescendant(of: content)
+    }
+
+    /// What a title-bar double-click does, per System Settings → Desktop &
+    /// Dock → "Double-click a window's title bar to". `UserDefaults.standard`
+    /// reads the global domain where that setting lives. "Fill" and an unset
+    /// key fall to `zoom`, the nearest public call.
+    private static func performTitleBarDoubleClick(on window: NSWindow) {
+        switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+        case "Minimize": window.miniaturize(nil)
+        case "None": break
+        default: window.zoom(nil)
+        }
+    }
+
     /// Route left-mouse-down clicks inside the detail column to pane focus.
     /// WKWebView eats mouse events entirely, so the SwiftUI
     /// `.simultaneousGesture(TapGesture())` on `paneCell` never fires when
@@ -915,7 +949,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // gesture that does nothing at all.
             // Ordered after the close X so the X keeps the smaller,
             // more specific target.
-            if event.clickCount == 2, clickYFromTop < PaneHeaderStrip.height,
+            // Only the header's lower band, below the title bar: a
+            // double-click in the title bar, or on the window's top
+            // resize edge (which reaches here with a NEGATIVE y), is the
+            // system's — zoom, or snapping the edge to the screen top.
+            let titleBarHeight: CGFloat = 28
+            if event.clickCount == 2,
+               clickYFromTop > titleBarHeight, clickYFromTop < PaneHeaderStrip.height,
                store.beginRenameForPane(at: index) {
                 return nil
             }
@@ -933,7 +973,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // top 20 of its 32pt — an intermittent failure that only
             // works when clicked low, which is worse to diagnose than
             // a dead button.
-            let titleBarHeight: CGFloat = 28
             if clickYFromTop > titleBarHeight {
                 // Focus only moves when it isn't already here, but the
                 // MacroPad stamp is unconditional — and the difference
@@ -949,6 +988,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     store.setFocusedPaneIndex(index)
                 }
                 self?.macroPad?.noteInteraction(paneIndex: index)
+            }
+            // Dragging the header moves the window. Nothing else in the
+            // header handles a press, so the event is consumed: the drag
+            // tracks to mouse-up, and passing the stale mouse-down on
+            // afterwards would hand SwiftUI a press with no release.
+            if event.clickCount == 1,
+               Self.headerPressIsUnhandledChrome(event, yFromTop: clickYFromTop) {
+                event.window?.performDrag(with: event)
+                return nil
+            }
+            // The title-bar band's double-click, which AppKit does not
+            // perform here for the same reason it does not drag. The lower
+            // band's double-click was rename, handled above.
+            if event.clickCount == 2, clickYFromTop <= titleBarHeight,
+               Self.headerPressIsUnhandledChrome(event, yFromTop: clickYFromTop),
+               let window = event.window {
+                Self.performTitleBarDoubleClick(on: window)
+                return nil
             }
             return event
         }
