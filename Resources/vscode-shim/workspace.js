@@ -375,10 +375,7 @@ function createConfiguration(settingsPath, extensionPackageJson, canopySettingsP
 // openTextDocument / file-backed documents
 // ---------------------------------------------------------------------------
 
-// `MirrorUIFrame.maxInlineContentBytes` (2 MiB). JSON escaping can grow a
-// stdout line up to 6×, and both NDJSON buffers cut the connection at 16 MiB,
-// so a file opened through `showTextDocument` has to be cut before it is
-// stringified. The note sits after the cap; it is short and ASCII.
+// Keep equal to `MirrorUIFrame.maxInlineContentBytes`.
 const SHOW_DOCUMENT_MAX_BYTES = 2 << 20;
 const SHOW_DOCUMENT_TRUNCATION_NOTE =
   "\n\n… truncated (file is larger than the viewer will send)";
@@ -422,11 +419,8 @@ function languageIdForPath(filePath) {
   }
 }
 
-// Longest prefix of `text` whose UTF-8 length is at most `maxBytes`.
-// `Buffer.byteLength` counts a lone surrogate as U+FFFD (3 bytes), so a
-// prefix that fits only by ending on the leading half of an emoji is one
-// byte-length check away from being "short enough". Drop that half:
-// `JSON.stringify` would emit `\ud83d`, and a later reader can reject it.
+// Longest prefix of `text` whose UTF-8 length is at most `maxBytes`. A prefix can end on the high
+// half of a surrogate pair; drop it so JSON.stringify does not emit a lone `\ud83d`.
 function headUtf8(text, maxBytes) {
   if (Buffer.byteLength(text) <= maxBytes) return text;
   let lo = 0;
@@ -451,14 +445,8 @@ function positionAt(content, offset) {
 }
 
 /**
- * A TextDocument for a file on disk.
- *
- * Claude Code's `openFile` (extension 2.1.329) calls
- * `showTextDocument(Uri.file(path))` and, on success, reads
- * `editor.document.getText()` / `positionAt`. A `Uri` has neither, which is
- * how a click used to open an empty "untitled". A NUL byte is refused rather
- * than shown: `openFile` then falls through to `vscode.open`, and a binary
- * dump is not a document.
+ * A TextDocument for a file on disk, with the `getText` / `positionAt` that `openFile` reads.
+ * A NUL byte is refused: a binary dump is not a document.
  */
 function readFileTextDocument(filePath) {
   const buf = fs.readFileSync(filePath);

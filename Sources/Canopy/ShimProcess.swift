@@ -4044,8 +4044,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         {
             // Handle open_file: read file and show in ContentViewer directly.
             // open_content: show provided content in ContentViewer.
-            // open_user_settings_file: the held-message notice. It does not go
-            // to the extension; see `handleOpenUserSettingsFile`.
             if reqType == "open_file" {
                 handleOpenFile(request, requestId: dict["requestId"] as? String)
                 return
@@ -5023,16 +5021,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                             projectDirs: [checkouts.main].compactMap { $0 } + checkouts.linked)
     }
 
-    /// The directory Claude Code joins with `settings.json` for
-    /// `open_user_settings_file`.
-    ///
-    /// Extension 2.1.329 `gg()` — the notice itself shipped in 2.1.328 —
-    /// returns `CLAUDE_CONFIG_DIR` when that variable is set, otherwise
-    /// `~/.claude`. A second login is `claudeAccount`, and that path is what
-    /// the shim is given as `CLAUDE_CONFIG_DIR`, so it wins over a value
-    /// inherited by this process. An empty string is absent, matching
-    /// `if (process.env.CLAUDE_CONFIG_DIR)`. A string of spaces is kept:
-    /// that check is true for `"  "`.
+    /// The directory for `open_user_settings_file`: the extension's `gg()`, i.e. `CLAUDE_CONFIG_DIR`
+    /// (the account's wins; empty is absent) or `~/.claude`. Not modelled: the handler's `Fn()` first
+    /// prefers a config home moved via `claude auth status`.
     static func claudeUserConfigDir(accountConfigDir: String?, inherited: String?, home: String) -> String {
         if let accountConfigDir, !accountConfigDir.isEmpty { return accountConfigDir }
         if let inherited, !inherited.isEmpty { return inherited }
@@ -5052,23 +5043,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let file = URL(fileURLWithPath: configDir, isDirectory: true).appendingPathComponent("settings.json")
         if fileManager.fileExists(atPath: file.path) { return file }
         if (try? fileManager.destinationOfSymbolicLink(atPath: file.path)) != nil { return file }
-        try? fileManager.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if !fileManager.fileExists(atPath: file.path),
-           (try? fileManager.destinationOfSymbolicLink(atPath: file.path)) == nil {
-            try? Self.emptyClaudeUserSettings.write(to: file, options: .atomic)
+        do {
+            try fileManager.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if !fileManager.fileExists(atPath: file.path),
+               (try? fileManager.destinationOfSymbolicLink(atPath: file.path)) == nil {
+                try Self.emptyClaudeUserSettings.write(to: file, options: .atomic)
+            }
+        } catch {
+            logger.error("ensureClaudeUserSettingsFile: \(file.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
         return file
     }
 
-    /// The held-message notice sends `open_user_settings_file` and waits on
-    /// `open_user_settings_file_response`. The extension would open
-    /// `<config dir>/settings.json` via `showTextDocument(Uri)`. Handled here,
-    /// through `open_file`'s routing, because the file is outside the
-    /// session's repository — `isOpenFileAllowed` would refuse it and the
-    /// click would answer with nothing on screen — and because a mirror's
-    /// click has to land on the Mac that clicked. `show_document` cannot do
-    /// that: the frame carries no request id. The path is computed here, not
-    /// taken from the webview.
+    /// The held-message notice's link. Handled here, like `open_file`, so a mirror's click lands on the
+    /// Mac that clicked (`show_document` has no request id). The path is computed here, never taken from
+    /// the webview. Opened in the default editor: the notice asks the user to edit it, and ContentViewer is read-only.
     private func handleOpenUserSettingsFile(requestId: String?) {
         let dir = Self.claudeUserConfigDir(
             accountConfigDir: claudeAccount?.configDir,
@@ -5077,7 +5066,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         let file = Self.ensureClaudeUserSettingsFile(in: dir)
         logger.notice("open_user_settings_file: \(file.path, privacy: .public)")
         handleOpenFile(
-            ["filePath": file.path],
+            ["filePath": file.path, "openExternal": true],
             requestId: requestId,
             responseType: "open_user_settings_file_response",
             enforcingAllowlist: false)
@@ -5087,10 +5076,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// instead of forwarding to extension (which triggers file:// navigation → WebContent crash).
     /// When `openExternal` is true (set by Cmd-click), opens in the macOS default app.
     ///
-    /// `responseType` is `open_file_response` except for `open_user_settings_file`,
-    /// which the webview is waiting on under its own name. `enforcingAllowlist` is
-    /// false only for that call: the path was just computed here, and it is outside
-    /// the repository on purpose.
+    /// `responseType` and `enforcingAllowlist: false` are for `handleOpenUserSettingsFile` only.
     private func handleOpenFile(
         _ request: [String: Any],
         requestId: String?,
@@ -5119,7 +5105,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             } else {
                 url = workingDirectory.appendingPathComponent(filePath)
             }
-            // Resolve symlinks and ensure the file is in this session's repository (prevent path traversal)
+            // Resolve symlinks and, unless told not to, ensure the file is in this session's repository
             let resolved = url.standardizedFileURL.resolvingSymlinksInPath()
             if enforcingAllowlist {
                 guard isOpenFileAllowed(resolved) else {

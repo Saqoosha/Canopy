@@ -286,11 +286,7 @@ function createWindow() {
 
     // -- showTextDocument ---------------------------------------------------
     //
-    // A TextDocument is shown from `getText()`, as before. A file `Uri` is
-    // read first: Claude Code's `openFile` passes `Uri.file(path)` and then
-    // uses the resolved editor's `document`. Rejecting (missing file, binary)
-    // is what lets that call fall through to `vscode.open`; resolving an
-    // empty "untitled" is the click that used to look like it worked.
+    // A `file:` Uri is read from disk (`openFile` passes `Uri.file(path)`); a read failure rejects.
 
     showTextDocument(doc, _options) {
       let shown = doc;
@@ -309,10 +305,7 @@ function createWindow() {
         languageId: (shown && shown.languageId) || "plaintext",
       });
       if (!hasText) return Promise.resolve({});
-      // `openFile`'s success callback sets `selection` and calls `revealRange`
-      // when the click carried a line or a search. Neither has a host-side
-      // effect — the document is already on stdout — but both have to exist
-      // or that callback rejects after the file was shown.
+      // `openFile` reads `document` and calls `revealRange` after showing; both must exist.
       return Promise.resolve({
         document: shown,
         revealRange() {},

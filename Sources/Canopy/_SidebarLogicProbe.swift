@@ -16520,9 +16520,7 @@ enum SidebarLogicProbe {
                    same(ShimProcess.addingSessionIfMissing(other, id: "moved") { entry }, other))
         }
 
-        // Held-message notice: which directory's settings.json, and the bytes
-        // written when it is missing. Both are extension 2.1.329 (`gg()` and
-        // `X9(path, {})`); the notice itself is the 2.1.328 release note.
+        // Held-message notice: which directory's settings.json, and the bytes written when it is missing.
         do {
             let fm = FileManager.default
             let root = fm.temporaryDirectory.appendingPathComponent("canopy-user-settings-\(UUID().uuidString)")
