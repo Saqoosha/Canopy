@@ -5057,16 +5057,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// The held-message notice's link. Handled here, like `open_file`, so a mirror's click lands on the
     /// Mac that clicked (`show_document` has no request id). The path is computed here, never taken from
-    /// the webview. Opened in the default editor: the notice asks the user to edit it, and ContentViewer is read-only.
+    /// the webview. A click on this Mac opens the default editor (the notice asks for an edit; ContentViewer
+    /// is read-only); another Mac's click keeps `open_file`'s routing to that Mac.
     private func handleOpenUserSettingsFile(requestId: String?) {
         let dir = Self.claudeUserConfigDir(
             accountConfigDir: claudeAccount?.configDir,
             inherited: ProcessInfo.processInfo.environment["CLAUDE_CONFIG_DIR"],
             home: FileManager.default.homeDirectoryForCurrentUser.path)
         let file = Self.ensureClaudeUserSettingsFile(in: dir)
-        logger.notice("open_user_settings_file: \(file.path, privacy: .public)")
+        var clickedElsewhere = false
+        if let requestId, case .mirror(let key)? = requestOwners[requestId], mirrors[key]?.sink?.isLocalClient != true {
+            clickedElsewhere = true
+        }
+        logger.notice("open_user_settings_file: \(file.path, privacy: .public) remote=\(clickedElsewhere, privacy: .public)")
         handleOpenFile(
-            ["filePath": file.path, "openExternal": true],
+            ["filePath": file.path, "openExternal": !clickedElsewhere],
             requestId: requestId,
             responseType: "open_user_settings_file_response",
             enforcingAllowlist: false)
@@ -5074,7 +5079,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// Handle open_file request from webview. By default shows the file in ContentViewer
     /// instead of forwarding to extension (which triggers file:// navigation → WebContent crash).
-    /// When `openExternal` is true (set by Cmd-click), opens in the macOS default app.
+    /// When `openExternal` is true (Cmd-click, or the settings link on this Mac), opens in the macOS default app.
     ///
     /// `responseType` and `enforcingAllowlist: false` are for `handleOpenUserSettingsFile` only.
     private func handleOpenFile(
