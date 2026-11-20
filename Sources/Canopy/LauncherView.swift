@@ -197,6 +197,8 @@ struct LauncherView: View {
     @State private var peerFolderSessions: [MirrorRecents.Session]?
     @State private var peerFolderSessionsError: String?
     @State private var peerFolderSessionsSource: String?
+    /// The selected folder's closed sessions on this Mac, newest first; nil while loading.
+    @State private var localFolderSessions: [SessionEntry]?
     @State private var recentDirectories: [URL] = []
     @State private var isDropTargeted = false
     @State private var remoteHost: String = ""
@@ -462,6 +464,7 @@ struct LauncherView: View {
             if let peerMachineId { store.refreshRemoteRecents(machineId: peerMachineId) }
         }
         .task(id: peerRecentsKey + "\n" + (peerFolder ?? "")) { await refreshPeerFolderSessions() }
+        .task(id: localFolderSessionsKey) { await refreshLocalFolderSessions() }
         .sheet(isPresented: $showWebSessions) {
             webSessionsSection
                 .padding(20)
@@ -1105,7 +1108,7 @@ struct LauncherView: View {
         } else if peerFolder != nil, sessions?.isEmpty != false {
             Section { Text(sessions == nil ? "Loading…" : "No closed sessions") }
         } else if let sessions {
-            Section(isPeerOnNoFolder ? NoFolder.displayName : peerFolder.map { ($0 as NSString).lastPathComponent } ?? peer.title) {
+            Section {
                 ForEach(sessions) { recent in
                     Button {
                         store.openRemoteRecent(machineId: peer.machineId, machineName: peer.title, recent: recent,
@@ -1114,6 +1117,52 @@ struct LauncherView: View {
                         Text(Self.peerSessionLabel(recent))
                     }
                 }
+            }
+        }
+    }
+
+    /// The folder whose sessions `localSessionRows` lists; nil when the launch is not on this Mac.
+    private var localFolderSessionsKey: String? {
+        guard selectedPeer == nil, !isRemoteMode else { return nil }
+        return selectedDirectory?.path
+    }
+
+    private func refreshLocalFolderSessions() async {
+        localFolderSessions = nil
+        guard let path = localFolderSessionsKey else { return }
+        let hidden = store.hiddenIds
+        let entries = await Task.detached {
+            ClaudeSessionHistory.loadNewestSessions(for: URL(fileURLWithPath: path), keep: MirrorRecents.maxSessions,
+                                                    excluding: hidden)
+        }.value
+        guard !Task.isCancelled else { return }
+        localFolderSessions = entries.filter(\.canOpen)
+    }
+
+    /// The selected folder's closed sessions on this Mac, the same rows a peer's folder gets.
+    /// Picking one resumes it at once; the composer below does not apply to it.
+    @ViewBuilder
+    private var localSessionRows: some View {
+        if let dir = selectedDirectory, localFolderSessionsKey != nil {
+            let open = Set(store.openSessions.map(\.resumeId))
+            let sessions = localFolderSessions?.filter { !open.contains($0.id) }
+            if let sessions, !sessions.isEmpty {
+                Section {
+                    ForEach(sessions) { entry in
+                        Button {
+                            appState.launchSession(directory: dir, resumeSessionId: entry.id, sessionTitle: entry.title,
+                                                   model: model.isEmpty ? nil : model,
+                                                   effortLevel: effortLevel.isEmpty ? nil : effortLevel,
+                                                   permissionMode: resolvedPermission, customApi: buildCustomApiConfig())
+                        } label: {
+                            Text(Self.peerSessionLabel(MirrorRecents.Session(id: entry.id, title: entry.title,
+                                                                             project: entry.projectName,
+                                                                             timestamp: entry.timestamp)))
+                        }
+                    }
+                }
+            } else {
+                Section { Text(sessions == nil ? "Loading…" : "No closed sessions") }
             }
         }
     }
@@ -1178,7 +1227,7 @@ struct LauncherView: View {
             // Disabled rather than hidden: a row that vanishes reads as a bug,
             // and the point is to say WHY the two cannot combine.
             .disabled(willCreateWorktree || isOnNoFolder)
-            if let peer = selectedPeer { peerSessionRows(peer) }
+            if let peer = selectedPeer { peerSessionRows(peer) } else { localSessionRows }
         } label: {
             ChipLabel(
                 icon: willContinueSession ? "arrow.uturn.backward" : "plus.bubble",
