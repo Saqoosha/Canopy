@@ -817,10 +817,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// What a title-bar double-click does, per System Settings → Desktop &
     /// Dock → "Double-click a window's title bar to". `UserDefaults.standard`
-    /// reads the global domain where that setting lives. "Fill" and an unset
-    /// key fall to `zoom`, the nearest public call.
+    /// reads the global domain where that setting lives; an unset key falls
+    /// back to the older `AppleMiniaturizeOnDoubleClick` bool. "Fill" falls
+    /// to `zoom`, the nearest public call.
     private static func performTitleBarDoubleClick(on window: NSWindow) {
-        switch UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick") {
+        let defaults = UserDefaults.standard
+        let action = defaults.string(forKey: "AppleActionOnDoubleClick")
+            ?? (defaults.bool(forKey: "AppleMiniaturizeOnDoubleClick") ? "Minimize" : "Maximize")
+        switch action {
         case "Minimize": window.miniaturize(nil)
         case "None": break
         default: window.zoom(nil)
@@ -837,13 +841,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// pane body is a deliberate act on that pane, so it stamps interaction
     /// on the MacroPad controller — see the comment at that call for why the
     /// stamp is NOT tied to the focus change. Pass the event through
-    /// unchanged so WKWebView still receives it — with two exceptions, both
-    /// CONSUMED because SwiftUI appears never to receive mouse-down in that
-    /// band (see `PaneHeaderStrip`'s doc for what was and was not measured):
-    /// a click inside a pane header's `closeButtonHitRect` closes that pane,
-    /// and a double-click on a session pane's header opens the rename sheet —
-    /// that second one consumed only when a sheet actually opens, so a
-    /// launcher pane's header still zooms the window.
+    /// unchanged so WKWebView still receives it — except presses in a pane
+    /// header, which are CONSUMED because neither SwiftUI nor AppKit's title-bar
+    /// handling acts on them there (see `PaneHeaderStrip`'s doc): the close X,
+    /// rename on a lower-band double-click, the window drag, and the title-bar
+    /// double-click action.
     private func installPaneFocusClickMonitor() {
         guard paneFocusClickMonitor == nil else { return }
         paneFocusClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
@@ -993,15 +995,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // header handles a press, so the event is consumed: the drag
             // tracks to mouse-up, and passing the stale mouse-down on
             // afterwards would hand SwiftUI a press with no release.
+            // Consuming also skips `NSWindow.sendEvent`, which is what makes a
+            // clicked background window key, so do that here.
             if event.clickCount == 1,
-               Self.headerPressIsUnhandledChrome(event, yFromTop: clickYFromTop) {
-                event.window?.performDrag(with: event)
+               Self.headerPressIsUnhandledChrome(event, yFromTop: clickYFromTop),
+               let window = event.window {
+                if !window.isKeyWindow { window.makeKeyAndOrderFront(nil) }
+                window.performDrag(with: event)
                 return nil
             }
-            // The title-bar band's double-click, which AppKit does not
-            // perform here for the same reason it does not drag. The lower
-            // band's double-click was rename, handled above.
-            if event.clickCount == 2, clickYFromTop <= titleBarHeight,
+            // The title-bar double-click, which AppKit does not perform here
+            // for the same reason it does not drag. Any header band: a
+            // lower-band double-click that did not rename (a launcher pane)
+            // would otherwise do nothing.
+            if event.clickCount == 2,
                Self.headerPressIsUnhandledChrome(event, yFromTop: clickYFromTop),
                let window = event.window {
                 Self.performTitleBarDoubleClick(on: window)
