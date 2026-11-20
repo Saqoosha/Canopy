@@ -793,6 +793,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return nil
     }
 
+    /// Whether a press in a pane header is one AppKit will not handle as
+    /// title-bar chrome, so the monitor must: the window drag, and the
+    /// title-bar double-click.
+    ///
+    /// True when the view under the press lies inside the content view. With
+    /// a session pane open, dragging its header moved nothing, at y 12 and
+    /// y 38, although the hit view (an `NSHostingView`) answered
+    /// `mouseDownCanMoveWindow == true` (measured 2026-11-20), so that
+    /// property cannot pick out the presses AppKit will not drag. A press
+    /// whose hit view lies outside the content view — the traffic lights,
+    /// the frame's resize edge (`NSThemeFrame` at y 1, measured) — is left
+    /// to AppKit.
+    private static func headerPressIsUnhandledChrome(_ event: NSEvent, yFromTop: CGFloat) -> Bool {
+        guard yFromTop >= 0, yFromTop < PaneHeaderStrip.height,
+              let content = event.window?.contentView,
+              let frameView = content.superview,
+              // hitTest takes superview coordinates; the frame view has
+              // none, so that is window coordinates.
+              let hit = frameView.hitTest(event.locationInWindow) else { return false }
+        return hit.isDescendant(of: content)
+    }
+
+    /// What a title-bar double-click does, per System Settings → Desktop &
+    /// Dock → "Double-click a window's title bar to". `UserDefaults.standard`
+    /// reads the global domain where that setting lives; an unset key falls
+    /// back to the older `AppleMiniaturizeOnDoubleClick` bool. "Fill" falls
+    /// to `zoom`, the nearest public call.
+    private static func performTitleBarDoubleClick(on window: NSWindow) {
+        let defaults = UserDefaults.standard
+        let action = defaults.string(forKey: "AppleActionOnDoubleClick")
+            ?? (defaults.bool(forKey: "AppleMiniaturizeOnDoubleClick") ? "Minimize" : "Maximize")
+        switch action {
+        case "Minimize": window.miniaturize(nil)
+        case "None": break
+        default: window.zoom(nil)
+        }
+    }
+
     /// Route left-mouse-down clicks inside the detail column to pane focus.
     /// WKWebView eats mouse events entirely, so the SwiftUI
     /// `.simultaneousGesture(TapGesture())` on `paneCell` never fires when
@@ -803,13 +841,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// pane body is a deliberate act on that pane, so it stamps interaction
     /// on the MacroPad controller — see the comment at that call for why the
     /// stamp is NOT tied to the focus change. Pass the event through
-    /// unchanged so WKWebView still receives it — with two exceptions, both
-    /// CONSUMED because SwiftUI appears never to receive mouse-down in that
-    /// band (see `PaneHeaderStrip`'s doc for what was and was not measured):
-    /// a click inside a pane header's `closeButtonHitRect` closes that pane,
-    /// and a double-click on a session pane's header opens the rename sheet —
-    /// that second one consumed only when a sheet actually opens, so a
-    /// launcher pane's header still zooms the window.
+    /// unchanged so WKWebView still receives it — except presses in a pane
+    /// header, which are CONSUMED because neither SwiftUI nor AppKit's title-bar
+    /// handling acts on them there (see `PaneHeaderStrip`'s doc): the close X,
+    /// rename on a lower-band double-click, the window drag, and the title-bar
+    /// double-click action.
     private func installPaneFocusClickMonitor() {
         guard paneFocusClickMonitor == nil else { return }
         paneFocusClickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
@@ -908,14 +944,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Double-click the header to rename, for the same
             // reason the close X is hit-tested here rather than by
             // SwiftUI: no mouse event reaches what that strip draws.
-            // Consumed ONLY when a sheet actually opened, so the
-            // click can still zoom the window otherwise — a launcher
-            // pane has no session to name, and consuming there would
-            // both fail to rename and swallow the zoom, leaving a
-            // gesture that does nothing at all.
+            // Consumed ONLY when a sheet actually opened.
             // Ordered after the close X so the X keeps the smaller,
             // more specific target.
-            if event.clickCount == 2, clickYFromTop < PaneHeaderStrip.height,
+            // Only the header's lower band: the title-bar band's
+            // double-click is the title-bar action (below), and the
+            // window's top resize edge (which reaches here with a
+            // NEGATIVE y) snaps that edge to the screen top.
+            let titleBarHeight: CGFloat = 28
+            if event.clickCount == 2,
+               clickYFromTop > titleBarHeight, clickYFromTop < PaneHeaderStrip.height,
                store.beginRenameForPane(at: index) {
                 return nil
             }
@@ -933,7 +971,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // top 20 of its 32pt — an intermittent failure that only
             // works when clicked low, which is worse to diagnose than
             // a dead button.
-            let titleBarHeight: CGFloat = 28
             if clickYFromTop > titleBarHeight {
                 // Focus only moves when it isn't already here, but the
                 // MacroPad stamp is unconditional — and the difference
@@ -950,6 +987,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 self?.macroPad?.noteInteraction(paneIndex: index)
             }
+            // Dragging the header moves the window. Nothing else in the
+            // header handles a press, so the event is consumed: the drag
+            // tracks to mouse-up, and passing the stale mouse-down on
+            // afterwards would hand SwiftUI a press with no release.
+            // Consuming also skips `NSWindow.sendEvent`, which is what makes a
+            // clicked background window key, so do that here.
+            if event.clickCount == 1,
+               Self.headerPressIsUnhandledChrome(event, yFromTop: clickYFromTop),
+               let window = event.window {
+                // Cmd-drag moves a background window without raising it.
+                if !window.isKeyWindow, !event.modifierFlags.contains(.command) {
+                    window.makeKeyAndOrderFront(nil)
+                }
+                window.performDrag(with: event)
+                return nil
+            }
+            // The title-bar double-click, which AppKit does not perform here
+            // for the same reason it does not drag. Title-bar band only: the
+            // lower band belongs to rename.
+            if event.clickCount == 2, clickYFromTop <= titleBarHeight,
+               Self.headerPressIsUnhandledChrome(event, yFromTop: clickYFromTop),
+               let window = event.window {
+                Self.performTitleBarDoubleClick(on: window)
+                return nil
+            }
             return event
         }
         // `addLocalMonitorForEvents` returns nil on sandboxing/mask rejection
@@ -960,13 +1022,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `applicationDidFinishLaunching`. Its
         // sibling `installKeyTypingMonitor` has warned about this for a
         // while; this one now has more to lose — a nil here silently takes
-        // out pane focus by click, the close X, header rename, AND one of the
+        // out pane focus by click, the close X, header rename, header window drag and double-click, AND one of the
         // two mouse gestures that acknowledge an unread mark on an
         // already-focused pane. The other three routes survive it: typing,
         // the pad key, and a click on that session's sidebar row, which
         // reaches the controller through SwiftUI rather than this monitor.
         if paneFocusClickMonitor == nil {
-            logger.warning("installPaneFocusClickMonitor: addLocalMonitorForEvents returned nil — pane focus by click, the close X, header rename, and acknowledging a MacroPad unread mark by clicking its pane are all dead (typing, the pad key, and clicking its sidebar row still acknowledge)")
+            logger.warning("installPaneFocusClickMonitor: addLocalMonitorForEvents returned nil — pane focus by click, the close X, header rename, header window drag and double-click, and acknowledging a MacroPad unread mark by clicking its pane are all dead (typing, the pad key, and clicking its sidebar row still acknowledge)")
         }
     }
 
