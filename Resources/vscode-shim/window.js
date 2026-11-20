@@ -5,7 +5,9 @@ const {
   EventEmitter,
   Disposable,
   CancellationTokenNone,
+  Uri,
 } = require("./types.js");
+const { readFileTextDocument } = require("./workspace.js");
 const { createNotificationHandler } = require("./notifications.js");
 const { createEmphasisRepairer } = require("./cjk-emphasis-stream.js");
 
@@ -283,15 +285,39 @@ function createWindow() {
     },
 
     // -- showTextDocument ---------------------------------------------------
+    //
+    // A TextDocument is shown from `getText()`, as before. A file `Uri` is
+    // read first: Claude Code's `openFile` passes `Uri.file(path)` and then
+    // uses the resolved editor's `document`. Rejecting (missing file, binary)
+    // is what lets that call fall through to `vscode.open`; resolving an
+    // empty "untitled" is the click that used to look like it worked.
 
     showTextDocument(doc, _options) {
+      let shown = doc;
+      if (!(doc && typeof doc.getText === "function") && doc instanceof Uri && doc.scheme === "file") {
+        try {
+          shown = readFileTextDocument(doc.fsPath);
+        } catch (err) {
+          return Promise.reject(err);
+        }
+      }
+      const hasText = shown && typeof shown.getText === "function";
       writeStdout({
         type: "show_document",
-        content: typeof doc.getText === "function" ? doc.getText() : "",
-        fileName: doc.fileName || (doc.uri && doc.uri.fsPath) || "untitled",
-        languageId: doc.languageId || "plaintext",
+        content: hasText ? shown.getText() : "",
+        fileName: (shown && (shown.fileName || (shown.uri && shown.uri.fsPath))) || "untitled",
+        languageId: (shown && shown.languageId) || "plaintext",
       });
-      return Promise.resolve({});
+      if (!hasText) return Promise.resolve({});
+      // `openFile`'s success callback sets `selection` and calls `revealRange`
+      // when the click carried a line or a search. Neither has a host-side
+      // effect — the document is already on stdout — but both have to exist
+      // or that callback rejects after the file was shown.
+      return Promise.resolve({
+        document: shown,
+        revealRange() {},
+        selection: null,
+      });
     },
 
     // -- Tier 2 stubs -------------------------------------------------------

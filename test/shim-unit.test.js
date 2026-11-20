@@ -775,7 +775,11 @@ describe("commands", () => {
 // ===========================================================================
 // workspace.js tests
 // ===========================================================================
-const { createWorkspace } = require("../Resources/vscode-shim/workspace.js");
+const {
+  createWorkspace,
+  SHOW_DOCUMENT_MAX_BYTES,
+  SHOW_DOCUMENT_TRUNCATION_NOTE,
+} = require("../Resources/vscode-shim/workspace.js");
 
 describe("workspace", () => {
   let tmpDir, ws;
@@ -872,6 +876,50 @@ describe("workspace", () => {
     assert.equal(doc.getText(), "hello world");
     assert.equal(doc.languageId, "markdown");
     assert.equal(doc.isUntitled, true);
+  });
+
+  it("openTextDocument of a plain object does not read fsPath", async () => {
+    const file = path.join(tmpDir, "real.json");
+    fs.writeFileSync(file, '{"a":1}\n');
+    const doc = await ws.openTextDocument({ scheme: "file", fsPath: file, content: "virtual" });
+    assert.equal(doc.getText(), "virtual");
+    assert.equal(doc.isUntitled, true);
+    assert.equal(fs.readFileSync(file, "utf8"), '{"a":1}\n');
+  });
+
+  it("openTextDocument of a file Uri reads the file", async () => {
+    const file = path.join(tmpDir, "settings.json");
+    fs.writeFileSync(file, '{}\n');
+    const doc = await ws.openTextDocument(Uri.file(file));
+    assert.equal(doc.getText(), "{}\n");
+    assert.equal(doc.languageId, "json");
+    assert.equal(doc.isUntitled, false);
+    assert.equal(doc.fileName, Uri.file(file).fsPath);
+    assert.equal(doc.uri.scheme, "file");
+    assert.equal(doc.positionAt(0).line, 0);
+    assert.equal(doc.positionAt(0).character, 0);
+  });
+
+  it("openTextDocument of a string path reads the file", async () => {
+    const file = path.join(tmpDir, "note.txt");
+    fs.writeFileSync(file, "hello");
+    const doc = await ws.openTextDocument(file);
+    assert.equal(doc.getText(), "hello");
+    assert.equal(doc.languageId, "plaintext");
+    assert.equal(doc.fileName, Uri.file(file).fsPath);
+  });
+
+  it("openTextDocument of a missing file rejects and does not create it", async () => {
+    const file = path.join(tmpDir, "missing.json");
+    await assert.rejects(ws.openTextDocument(Uri.file(file)), (err) => err.code === "ENOENT");
+    assert.equal(fs.existsSync(file), false);
+  });
+
+  it("openTextDocument of a non-file Uri is not implemented", async () => {
+    const uri = Uri.from({ scheme: "untitled", path: path.join(tmpDir, "save-as.txt") });
+    fs.writeFileSync(uri.fsPath, "on disk");
+    await assert.rejects(ws.openTextDocument(uri), { message: "not implemented" });
+    assert.equal(fs.readFileSync(uri.fsPath, "utf8"), "on disk");
   });
 
   it("applyEdit returns false", async () => {
@@ -1133,6 +1181,77 @@ describe("window webview bridge", () => {
     assert.equal(parsed.content, "console.log('hello');");
     assert.equal(parsed.fileName, "/test/file.js");
     assert.equal(parsed.languageId, "javascript");
+  });
+
+  it("showTextDocument of a file Uri reads the file and returns an editor", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "canopy-show-"));
+    try {
+      const file = path.join(dir, "settings.json");
+      fs.writeFileSync(file, '{ "model": "opus" }\n');
+      const editor = await win.showTextDocument(Uri.file(file), { preview: false });
+      const parsed = JSON.parse(stdout[stdout.length - 1].replace(/\n$/, ""));
+      assert.equal(parsed.type, "show_document");
+      assert.equal(parsed.content, '{ "model": "opus" }\n');
+      assert.equal(parsed.fileName, Uri.file(file).fsPath);
+      assert.equal(parsed.languageId, "json");
+      assert.equal(editor.document.getText(), parsed.content);
+      assert.equal(typeof editor.revealRange, "function");
+      editor.revealRange({}, 0);
+      editor.selection = { line: 1 };
+      assert.deepEqual(editor.selection, { line: 1 });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("showTextDocument of a missing file rejects and writes nothing", async () => {
+    const missing = path.join(os.tmpdir(), `canopy-missing-${process.pid}.json`);
+    fs.rmSync(missing, { force: true });
+    await assert.rejects(win.showTextDocument(Uri.file(missing)), (err) => err.code === "ENOENT");
+    assert.equal(stdout.length, 0);
+    assert.equal(fs.existsSync(missing), false);
+  });
+
+  it("showTextDocument of a non-file Uri stays an empty untitled document", async () => {
+    const uri = Uri.from({ scheme: "untitled", path: "/tmp/not-a-file" });
+    const editor = await win.showTextDocument(uri);
+    const parsed = JSON.parse(stdout[stdout.length - 1].replace(/\n$/, ""));
+    assert.equal(parsed.type, "show_document");
+    assert.equal(parsed.content, "");
+    assert.equal(parsed.fileName, "untitled");
+    assert.equal(parsed.languageId, "plaintext");
+    assert.deepEqual(editor, {});
+  });
+
+  it("showTextDocument of a binary file rejects and writes nothing", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "canopy-bin-"));
+    try {
+      const file = path.join(dir, "blob.bin");
+      fs.writeFileSync(file, Buffer.from([0x89, 0x00, 0x50]));
+      await assert.rejects(win.showTextDocument(Uri.file(file)), (err) => err.code === "EUTF8");
+      assert.equal(stdout.length, 0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("showTextDocument cuts a file at the inline cap without splitting a surrogate", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "canopy-big-"));
+    try {
+      const prefix = "a".repeat(SHOW_DOCUMENT_MAX_BYTES - 3);
+      const file = path.join(dir, "big.txt");
+      fs.writeFileSync(file, prefix + "👍");
+      const editor = await win.showTextDocument(Uri.file(file));
+      const parsed = JSON.parse(stdout[stdout.length - 1].replace(/\n$/, ""));
+      const expected = prefix + SHOW_DOCUMENT_TRUNCATION_NOTE;
+      assert.equal(parsed.type, "show_document");
+      assert.equal(parsed.content, expected);
+      assert.equal(editor.document.getText(), expected);
+      assert.equal(parsed.content.includes("👍"), false);
+      assert.equal(parsed.content.includes("\uD83D"), false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("createTerminal writes open_terminal to stdout", () => {
