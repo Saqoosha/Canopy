@@ -1127,9 +1127,9 @@ struct LauncherView: View {
         return selectedDirectory?.path
     }
 
-    /// Reloads when a session opens or closes, so the list stays the folder's closed sessions.
+    /// Reloads when a session opens, closes, or is hidden or unhidden.
     private var localFolderSessionsTaskId: String {
-        (localFolderSessionsKey ?? "") + "\n" + store.openSessions.map(\.resumeId).sorted().joined(separator: ",")
+        (localFolderSessionsKey ?? "") + "\n\(store.hiddenIds.count)\n" + store.openSessions.map(\.resumeId).sorted().joined(separator: ",")
     }
 
     private func refreshLocalFolderSessions() async {
