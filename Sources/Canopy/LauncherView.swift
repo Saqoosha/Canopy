@@ -197,8 +197,8 @@ struct LauncherView: View {
     @State private var peerFolderSessions: [MirrorRecents.Session]?
     @State private var peerFolderSessionsError: String?
     @State private var peerFolderSessionsSource: String?
-    /// The selected folder's closed sessions on this Mac, newest first; nil while loading.
-    @State private var localFolderSessions: [SessionEntry]?
+    /// The selected folder's closed sessions on this Mac, newest first, with the folder they were read for.
+    @State private var localFolderSessions: (path: String, entries: [SessionEntry])?
     @State private var recentDirectories: [URL] = []
     @State private var isDropTargeted = false
     @State private var remoteHost: String = ""
@@ -464,7 +464,7 @@ struct LauncherView: View {
             if let peerMachineId { store.refreshRemoteRecents(machineId: peerMachineId) }
         }
         .task(id: peerRecentsKey + "\n" + (peerFolder ?? "")) { await refreshPeerFolderSessions() }
-        .task(id: localFolderSessionsKey) { await refreshLocalFolderSessions() }
+        .task(id: localFolderSessionsTaskId) { await refreshLocalFolderSessions() }
         .sheet(isPresented: $showWebSessions) {
             webSessionsSection
                 .padding(20)
@@ -1127,25 +1127,31 @@ struct LauncherView: View {
         return selectedDirectory?.path
     }
 
+    /// Reloads when a session opens or closes, so the list stays the folder's closed sessions.
+    private var localFolderSessionsTaskId: String {
+        (localFolderSessionsKey ?? "") + "\n" + store.openSessions.map(\.resumeId).sorted().joined(separator: ",")
+    }
+
     private func refreshLocalFolderSessions() async {
-        localFolderSessions = nil
         guard let path = localFolderSessionsKey else { return }
-        let hidden = store.hiddenIds
+        let excluded = store.hiddenIds.union(store.openSessions.map(\.resumeId))
         let entries = await Task.detached {
             ClaudeSessionHistory.loadNewestSessions(for: URL(fileURLWithPath: path), keep: MirrorRecents.maxSessions,
-                                                    excluding: hidden)
+                                                    excluding: excluded)
         }.value
         guard !Task.isCancelled else { return }
-        localFolderSessions = entries.filter(\.canOpen)
+        localFolderSessions = (path, entries)
     }
 
     /// The selected folder's closed sessions on this Mac, the same rows a peer's folder gets.
-    /// Picking one resumes it at once; the composer below does not apply to it.
+    /// Picking one resumes it at once with the chips' choices; the prompt box does not apply to it.
     @ViewBuilder
     private var localSessionRows: some View {
-        if let dir = selectedDirectory, localFolderSessionsKey != nil {
+        if let dir = selectedDirectory, let key = localFolderSessionsKey {
             let open = Set(store.openSessions.map(\.resumeId))
-            let sessions = localFolderSessions?.filter { !open.contains($0.id) }
+            // Another folder's rows would resume in `dir`; read as loading until this folder's arrive.
+            let sessions = localFolderSessions.flatMap { $0.path == key ? $0.entries : nil }?
+                .filter { !open.contains($0.id) && !store.hiddenIds.contains($0.id) }
             if let sessions, !sessions.isEmpty {
                 Section {
                     ForEach(sessions) { entry in
@@ -1156,7 +1162,7 @@ struct LauncherView: View {
                                                    permissionMode: resolvedPermission, customApi: buildCustomApiConfig())
                         } label: {
                             Text(Self.peerSessionLabel(MirrorRecents.Session(id: entry.id, title: entry.title,
-                                                                             project: entry.projectName,
+                                                                             project: "",
                                                                              timestamp: entry.timestamp)))
                         }
                     }
