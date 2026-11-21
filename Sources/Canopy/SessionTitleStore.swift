@@ -29,10 +29,13 @@ enum SessionTitleStore {
     /// decode: a synthesized `Decodable` requires a non-Optional key even when
     /// the property has a default, and one record failing to decode parks the
     /// whole store (see `load()`). Nil and false mean the same thing.
+    /// `savedAt` is Optional for the same reason; a record without it counts
+    /// as the oldest.
     private struct Record: Codable {
         var text: String
         var userOwned: Bool
         var settled: Bool?
+        var savedAt: Date?
     }
 
     private static let key = "sessionTitles.v2"
@@ -73,7 +76,8 @@ enum SessionTitleStore {
         records[sessionId] = Record(
             text: title,
             userOwned: userOwned || wasUserOwned,
-            settled: (settled || wasSettled) ? true : nil
+            settled: (settled || wasSettled) ? true : nil,
+            savedAt: Date()
         )
         return write(evicting: records, protecting: sessionId)
     }
@@ -121,7 +125,8 @@ enum SessionTitleStore {
     static func migrate(fromSessionId stale: String, toSessionId sessionId: String) {
         guard stale != sessionId, UUID(uuidString: sessionId) != nil else { return }
         guard case .ok(var records) = load() else { return }
-        guard let record = records.removeValue(forKey: stale) else { return }
+        guard var record = records.removeValue(forKey: stale) else { return }
+        record.savedAt = Date()
         records[sessionId] = record
         write(evicting: records, protecting: sessionId)
     }
@@ -216,10 +221,10 @@ enum SessionTitleStore {
     /// so an automatic write can outlive a user-owned record when every other
     /// candidate is user-owned.
     ///
-    /// The tiebreak is lexical on the id, not chronological — the record
-    /// carries no timestamp, so which of two equally-owned entries goes is
-    /// arbitrary rather than oldest-first. Nothing here claims otherwise, and
-    /// fixing it needs a new field.
+    /// Within a rank the least recently saved goes first. The tiebreak used to
+    /// be the id alone, which evicted every new session whose id sorted low:
+    /// on 2026-11-21 the store held 104 ordinary titles starting d-f and 1
+    /// starting 0-c.
     /// Lower goes first. A settled record outranks an ordinary one because
     /// losing it lets regeneration replace a title that matches its branch.
     private static func evictionRank(_ record: Record?) -> Int {
@@ -238,6 +243,9 @@ enum SessionTitleStore {
                     let l = evictionRank(records[lhs])
                     let r = evictionRank(records[rhs])
                     if l != r { return l < r }
+                    let lt = records[lhs]?.savedAt ?? .distantPast
+                    let rt = records[rhs]?.savedAt ?? .distantPast
+                    if lt != rt { return lt < rt }
                     return lhs < rhs
                 }
             let doomed = candidates.prefix(records.count - maxEntries)

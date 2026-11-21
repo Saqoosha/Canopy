@@ -13078,18 +13078,14 @@ enum SidebarLogicProbe {
             // --- eviction ---------------------------------------------------
             SessionTitleStore._probeReset()
             let cap = SessionTitleStore._probeMaxEntries
-            // The two special ids are the LEXICALLY SMALLEST in the store, and
-            // that is what makes these fixtures bite. `write` sorts candidates
-            // by (not-owned first, then id), so the victim is the smallest
-            // non-owned candidate. With random UUIDs both guards could be
-            // deleted and each assertion would still pass ~199 runs in 200 —
-            // measured, not assumed. Pinned here so removing either guard puts
-            // that guard's own id in the victim slot immediately.
+            // The special ids are written FIRST and are the lexically smallest,
+            // so they are the victim under either tiebreak (age, then id)
+            // unless their rank guard holds.
+            let owned = "00000000-0000-4000-8000-000000000001"
+            SessionTitleStore.save(title: "human", forSessionId: owned, userOwned: true)
             for _ in 0..<(cap - 1) {
                 SessionTitleStore.save(title: "auto", forSessionId: UUID().uuidString)
             }
-            let owned = "00000000-0000-4000-8000-000000000001"
-            SessionTitleStore.save(title: "human", forSessionId: owned, userOwned: true)
             record("eviction: the store fills to its cap",
                    SessionTitleStore._probeCount() == cap)
 
@@ -13110,15 +13106,30 @@ enum SidebarLogicProbe {
             // Same shape for the settled mark: its id is the smallest, so
             // without the rank it is the victim.
             SessionTitleStore._probeReset()
+            let settledId = "00000000-0000-4000-8000-000000000003"
+            SessionTitleStore.save(title: "settled", forSessionId: settledId, settled: true)
             for _ in 0..<(cap - 1) {
                 SessionTitleStore.save(title: "auto", forSessionId: UUID().uuidString)
             }
-            let settledId = "00000000-0000-4000-8000-000000000003"
-            SessionTitleStore.save(title: "settled", forSessionId: settledId, settled: true)
             SessionTitleStore.save(title: "newest", forSessionId: "00000000-0000-4000-8000-000000000004")
             record("eviction: a settled record outlives ordinary automatic ones",
                    SessionTitleStore.title(forSessionId: settledId) == "settled"
                    && SessionTitleStore.isSettled(settledId))
+
+            // Oldest goes first, not the smallest id: a new session whose id
+            // sorts low must keep its title over an old one whose id sorts high.
+            SessionTitleStore._probeReset()
+            let oldHigh = "ffffffff-ffff-4fff-bfff-ffffffffffff"
+            SessionTitleStore.save(title: "old", forSessionId: oldHigh)
+            for _ in 0..<(cap - 2) {
+                SessionTitleStore.save(title: "auto", forSessionId: UUID().uuidString)
+            }
+            let recentLow = "00000000-0000-4000-8000-000000000005"
+            SessionTitleStore.save(title: "recent", forSessionId: recentLow)
+            SessionTitleStore.save(title: "newest", forSessionId: "00000000-0000-4000-8000-000000000006")
+            record("eviction: the least recently saved record goes first",
+                   SessionTitleStore.title(forSessionId: oldHigh) == nil
+                   && SessionTitleStore.title(forSessionId: recentLow) == "recent")
 
             // --- legacy migration -------------------------------------------
             // The one path standing between an existing user and losing every
