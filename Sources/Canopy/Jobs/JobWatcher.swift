@@ -114,6 +114,9 @@ final class JobWatcher {
     private var timers: [String: Timer] = [:]
     private var running: Set<String> = []
     private var missingSince: [String: Date] = [:]
+    /// Bumped by every registration and never reset, so a probe started for an earlier
+    /// registration of the same spec cannot land in the new one.
+    private var generations: [String: Int] = [:]
 
     private var persistURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -143,6 +146,7 @@ final class JobWatcher {
     @discardableResult
     func watch(_ spec: JobSpec) -> JobSnapshot {
         tracks[spec.resumeId] = JobTrack(spec: spec)
+        generations[spec.resumeId, default: 0] += 1
         missingSince[spec.resumeId] = nil
         save()
         schedule(spec)
@@ -220,16 +224,17 @@ final class JobWatcher {
                 at: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh/cm"),
                 withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         }
+        let generation = generations[id, default: 0]
         Self.run(argv, env: env, timeout: Self.probeTimeout) { output, status in
-            MainActor.assumeIsolated { JobWatcher.shared.finish(id, spec: track.spec, output: output, status: status) }
+            MainActor.assumeIsolated { JobWatcher.shared.finish(id, generation: generation, output: output, status: status) }
         }
     }
 
-    private func finish(_ id: String, spec: JobSpec, output: String?, status: Int32) {
+    private func finish(_ id: String, generation: Int, output: String?, status: Int32) {
         running.remove(id)
         guard var track = tracks[id] else { return }
         // Re-registered while this probe ran: the reading is the old job's; read the new one now.
-        guard track.spec == spec else { tick(id); return }
+        guard generations[id, default: 0] == generation else { tick(id); return }
         let previous = track.lastState
         track.record(output: output, exitStatus: status, at: Date())
         let snap = track.snapshot(now: Date())

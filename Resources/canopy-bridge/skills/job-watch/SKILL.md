@@ -14,8 +14,8 @@ canopyctl job watch --session-id "${CLAUDE_SESSION_ID}" --label "IG LOD" \
   --probe 'grep -oE "\[[0-9]+/793\]" ~/woven-city/logs/ig_lod.log | tail -1' --host rt4090
 ```
 
-- `--probe`: a shell command whose output ends with `N/M` (done/total). Canopy reads the last `N/M` it prints.
-- `--total N`: when the probe can only print a count, e.g. `--probe 'ls renders/h7_final | wc -l' --total 1077`. Use `wc -l`, not `grep -c`: `grep -c` exits 1 at a count of 0, and a probe that exits non-zero counts as a failed reading.
+- `--probe`: a shell command whose output ends with `N/M` (done/total). Canopy reads the last `N/M` it prints. It runs in your home folder, not this session's, so name files by absolute path.
+- `--total N`: when the probe can only print a count, e.g. `--probe 'ls ~/work/project/renders/h7_final | wc -l' --total 1077`. Use `wc -l`, not `grep -c`: `grep -c` exits 1 at a count of 0, and a probe that exits non-zero counts as a failed reading.
 - `--host`: run the probe over ssh on that host (as `ssh <host> '<probe>'`). Omit it for a job on this Mac.
 - `--label`: a short name, shown on hover and in the push.
 - `--interval` (seconds, default 150, at least 30) and `--stall-minutes` (default: 60 until the count has moved twice, then the larger of 15 and three times the usual time between count changes). Pass `--stall-minutes` when one step can take longer than that, such as one epoch of a slow training run.
