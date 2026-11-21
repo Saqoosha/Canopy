@@ -71,8 +71,8 @@ test('clearing the job brings the note back for the next one', async ($, on) => 
   expect(nudged(await $.tool.call({ tool: 'Bash', command: 'nohup python train.py &' }))).toBe(true)
 })
 
-test('asking for help is not a registration', async ($, on) => {
+test('a clear then a watch in one command leaves the job registered', async ($, on) => {
   engine(on)
-  await $.tool.call({ tool: 'Bash', command: 'canopyctl job watch --help' })
-  expect(nudged(await $.tool.call({ tool: 'Bash', command: 'nohup python train.py &' }))).toBe(true)
+  await $.tool.call({ tool: 'Bash', command: 'canopyctl job clear --session-id x; canopyctl job watch --session-id x --label b --probe "du -h d | tail -1"' })
+  expect(nudged(await $.tool.call({ tool: 'Bash', command: 'nohup python train.py &' }))).toBe(false)
 })

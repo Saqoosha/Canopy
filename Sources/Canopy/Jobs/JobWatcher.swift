@@ -82,7 +82,8 @@ struct JobTrack: Codable, Equatable {
         samples = Array(kept.suffix(Self.sampleLimit))
     }
 
-    /// Why a reading is missing, for the hover and `job list`: the cause, then the probe's last line.
+    /// Why a reading is missing, for the hover and `job list`: the cause, then the probe's last
+    /// stdout line (stderr is not kept; see `runSync`).
     static func failureNote(output: String?, exitStatus: Int32, overSSH: Bool) -> String {
         let line = output?.split(whereSeparator: \.isNewline).last.map { String($0.prefix(80)) }
         switch exitStatus {
@@ -90,7 +91,7 @@ struct JobTrack: Codable, Equatable {
             return overSSH ? "ssh が応答しない（1Password の承認待ちかも）" : "30 秒で終わらない"
         case JobWatcher.launchFailed: return "起動できない"
         case JobWatcher.tooMuchOutput: return "出力が多すぎる"
-        case 0: return "出力に N/M が無い"
+        case 0: return overSSH || line != nil ? "出力に数が無い" : "出力が空"
         case 255 where overSSH: return "ssh の接続か認証に失敗" + (line.map { ": \($0)" } ?? "")
         default: return "exit \(exitStatus)" + (line.map { ": \($0)" } ?? "")
         }
@@ -281,7 +282,7 @@ final class JobWatcher {
     nonisolated static let tooMuchOutput: Int32 = -3
     nonisolated static let outputLimit = 1 << 20
 
-    /// Runs `argv` with stdout and stderr in one pipe and waits for that pipe to close, at most
+    /// Runs `argv` and waits for its stdout pipe to close, at most
     /// `timeout`. The wait is on the pipe, not the shell: a child left behind (`sleep 600 &`, a
     /// pipeline stage) keeps it open after `sh` exits. Past the timeout or `outputLimit`, the
     /// process tree is killed and the read abandoned.
@@ -295,12 +296,16 @@ final class JobWatcher {
         process.standardInput = FileHandle.nullDevice
         let pipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = pipe
+        // Not merged into the pipe: a warning after the count would be read as the count.
+        process.standardError = FileHandle.nullDevice
         do { try process.run() } catch {
             logger.error("probe did not start: \(error.localizedDescription, privacy: .public)")
             return (nil, launchFailed)
         }
         let pid = process.processIdentifier
+        // Read now: once sh has exited and been reaped, getpgid fails, yet its group lives on in
+        // the children it left behind.
+        let group = getpgid(pid)
         let buffer = OSAllocatedUnfairLock(initialState: (data: Data(), overflow: false))
         let closed = DispatchSemaphore(value: 0)
         let reader = pipe.fileHandleForReading
@@ -318,7 +323,7 @@ final class JobWatcher {
         let overflow = buffer.withLock { $0.overflow }
         if !finished || overflow {
             reader.readabilityHandler = nil
-            killTree(pid)
+            killTree(pid, group: group == pid ? group : nil)
         }
         process.waitUntilExit()
         let output = buffer.withLock { String(decoding: $0.data.suffix(64 * 1024), as: UTF8.self) }
@@ -327,10 +332,9 @@ final class JobWatcher {
         return (output, process.terminationStatus)
     }
 
-    /// Kills `pid`'s descendants (found by parent pid, never by name), then `pid`, then its
-    /// process group when it leads one, which also reaches children `sh` left behind.
-    nonisolated private static func killTree(_ pid: pid_t) {
-        let leadsGroup = getpgid(pid) == pid
+    /// Kills `pid`'s descendants (found by parent pid, never by name), then `pid`, then `group`
+    /// when the probe led its own, which also reaches children `sh` left behind. Never canopyd's.
+    nonisolated private static func killTree(_ pid: pid_t, group: pid_t?) {
         var queue = [pid], all: [pid_t] = []
         while let next = queue.popLast() {
             all.append(next)
@@ -346,7 +350,7 @@ final class JobWatcher {
             queue += text.split(whereSeparator: \.isNewline).compactMap { pid_t($0) }
         }
         for victim in all.reversed() { kill(victim, SIGKILL) }
-        if leadsGroup { killpg(pid, SIGKILL) }
+        if let group { killpg(group, SIGKILL) }
     }
 
     private func session(_ resumeId: String) -> OpenSession? {

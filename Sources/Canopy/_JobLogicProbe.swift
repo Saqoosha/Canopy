@@ -50,7 +50,7 @@ enum JobLogicProbe {
         let started = Date()
         let hung = JobWatcher.runSync(["/bin/sh", "-c", "sleep 30 | cat"], env: ProcessInfo.processInfo.environment, timeout: 1)
         let took = Date().timeIntervalSince(started)
-        record("review: a hung pipeline is killed at the timeout", hung.status == -1 && took < 5, "status=\(hung.status) took=\(took)")
+        record("review: a hung pipeline is killed at the timeout", hung.status == JobWatcher.timedOut && took < 5, "status=\(hung.status) took=\(took)")
         let ok = JobWatcher.runSync(["/bin/sh", "-c", "echo 3/10"], env: ProcessInfo.processInfo.environment, timeout: 5)
         record("review: a quick probe returns its output", ok.status == 0 && ok.output?.contains("3/10") == true, "\(ok)")
         shipItFixes(record)
@@ -103,13 +103,13 @@ enum JobLogicProbe {
 
         let localSpec = JobSpec(resumeId: "r", label: "L", probe: "p", host: nil, total: nil, interval: 150, stallMinutes: nil)
         var local = JobTrack(spec: localSpec)
-        local.record(output: "grep: log: No such file or directory\n", exitStatus: 2, at: t0)
-        record("ship: a failed local probe names why", local.note == "exit 2: grep: log: No such file or directory", "\(String(describing: local.note))")
+        local.record(output: "partial\n", exitStatus: 2, at: t0)
+        record("ship: a failed local probe names why", local.note == "exit 2: partial", "\(String(describing: local.note))")
         local.record(output: "starting\n", exitStatus: 0, at: t0)
-        record("ship: output without a count says so", local.note == "出力に N/M が無い", "\(String(describing: local.note))")
+        record("ship: output without a count says so", local.note == "出力に数が無い", "\(String(describing: local.note))")
         let orphan = JobWatcher.runSync(["/bin/sh", "-c", "sleep 30 & echo 1/10"], env: ProcessInfo.processInfo.environment, timeout: 1)
         record("ship: a background child holding the pipe does not outlast the timeout",
-               orphan.status == -1 || orphan.output?.contains("1/10") == true, "\(orphan)")
+               orphan.status == JobWatcher.timedOut && orphan.output?.contains("1/10") == true, "\(orphan)")
         let big = JobWatcher.runSync(["/bin/sh", "-c", "yes"], env: ProcessInfo.processInfo.environment, timeout: 5)
         record("ship: endless output is cut off", big.status == JobWatcher.tooMuchOutput, "status=\(big.status)")
 
