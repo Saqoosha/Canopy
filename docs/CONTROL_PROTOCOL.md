@@ -217,6 +217,23 @@ alert itself, and only Move pressed there lets the move go on, so this socket ca
 folder. The CLI's own trust file is outside Canopy's reach. A failure after `queued` raises a
 system notice on this Mac.
 
+### `job_watch`, `job_list`, `job_clear`
+
+A long job's progress, shown as a ring and a finish time on the session's sidebar row and on the
+phone (`docs/superpowers/specs/2026-11-21-job-eta-gauge-design.md`). One job per session.
+
+- `job_watch` (local clients only: it runs a shell command on a timer). Params: `key` or
+  `sessionId`, `label`, `probe` (a shell command printing `N/M`, or a count when `total` is given),
+  and optional `host` (run the probe over ssh there), `total`, `interval` (seconds, default 150,
+  at least 30) and `stallMinutes`. Replaces the session's job. Reply: `{"job": {...}}`, the
+  session row's `job` object.
+- `job_list`. Params: `key` or `sessionId`. Reply: `{"job": {...}}` or `{"job": null}`.
+- `job_clear` (local clients only). Params: `key` or `sessionId`. Reply: `{"cleared": true|false}`.
+
+canopyd runs the probe at once and then every `interval`, saves registrations in
+`~/Library/Application Support/Canopy/jobs-<bundle id>.json`, and drops a job whose session has not
+been open for 15 minutes. Over ssh it uses `SSH_AUTH_SOCK` from `~/.claude/settings.json`'s `env`.
+
 ### `send_message`
 
 Puts text on a live session through the same queue the phone uses

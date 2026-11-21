@@ -4,9 +4,62 @@ import Foundation
 /// Kept apart from that file only to stop it growing further; the harness
 /// (one `record` per assertion, counted against `EXPECTED_ASSERTIONS`) is the same.
 enum JobLogicProbe {
-    static func run(_ record: (String, Bool, String) -> Void) {
+    @MainActor static func run(_ record: (String, Bool, String) -> Void) {
         estimator(record)
         wire(record)
+        watcher(record)
+    }
+
+    @MainActor
+    private static func watcher(_ record: (String, Bool, String) -> Void) {
+        let local = JobSpec(resumeId: "r", label: "L", probe: "echo 3/10", host: nil, total: nil, interval: 150, stallMinutes: nil)
+        record("job: a local probe runs under sh -c", JobWatcher.command(for: local) == ["/bin/sh", "-c", "echo 3/10"],
+               "\(JobWatcher.command(for: local))")
+        let remote = JobSpec(resumeId: "r", label: "L", probe: "tail -1 log", host: "rt4090", total: nil, interval: 150, stallMinutes: nil)
+        let argv = JobWatcher.command(for: remote)
+        record("job: a remote probe is ssh with BatchMode, ConnectTimeout=10 and ControlPersist",
+               argv.first == "/usr/bin/ssh" && argv.suffix(2) == ["rt4090", "tail -1 log"]
+                   && ["BatchMode=yes", "ConnectTimeout=10", "ControlMaster=auto", "ControlPersist=10m"].allSatisfy(argv.contains)
+                   && argv.contains { $0.hasPrefix("ControlPath=") },
+               "\(argv)")
+        let settings = Data(#"{"env":{"SSH_AUTH_SOCK":"/x/agent.sock"}}"#.utf8)
+        record("job: SSH_AUTH_SOCK comes from settings.json env",
+               JobWatcher.sshAuthSock(settingsJSON: settings, fallback: "/y") == "/x/agent.sock", "")
+        record("job: SSH_AUTH_SOCK falls back without settings",
+               JobWatcher.sshAuthSock(settingsJSON: nil, fallback: "/y") == "/y"
+                   && JobWatcher.sshAuthSock(settingsJSON: Data("{}".utf8), fallback: "/y") == "/y", "")
+
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        var track = JobTrack(spec: remote)
+        track.record(output: "[3/10]\n", exitStatus: 0, at: t0)
+        track.record(output: "", exitStatus: 255, at: t0.addingTimeInterval(150))
+        record("job: a failed run counts a failure and keeps the samples",
+               track.failures == 1 && track.samples.count == 1 && track.note == "ssh の認証に失敗", "\(track)")
+        track.record(output: "[4/10]", exitStatus: 0, at: t0.addingTimeInterval(300))
+        record("job: a parsed run resets failures and the note",
+               track.failures == 0 && track.note == nil && track.samples.last?.done == 4, "\(track)")
+        track.record(output: "No such file", exitStatus: 0, at: t0.addingTimeInterval(450))
+        record("job: output without a count is a failure, not done = 0",
+               track.failures == 1 && track.samples.last?.done == 4, "\(track)")
+        let restored = (try? JSONEncoder().encode([track])).flatMap { try? JSONDecoder().decode([JobTrack].self, from: $0) }
+        record("job: tracks persist and restore", restored == [track], "")
+        var old = JobTrack(spec: local)
+        old.record(output: "1/10", exitStatus: 0, at: t0)
+        old.record(output: "2/10", exitStatus: 0, at: t0.addingTimeInterval(5 * 3600))
+        record("job: samples older than 4 h are dropped", old.samples.count == 1, "\(old.samples)")
+
+        var sent: [[String: Any]] = []
+        let tcp = ControlSession(store: SessionStore(), isLocal: false, allowBypass: { false }) { sent.append($0) }
+        for (id, verb) in [("J1", "job_watch"), ("J2", "job_clear")] {
+            tcp.handle(["type": "request", "id": id, "verb": verb, "params": ["sessionId": "x", "label": "L", "probe": "id"]])
+        }
+        record("job: job_watch and job_clear refuse a TCP client",
+               ["J1", "J2"].allSatisfy { id in sent.first { $0["id"] as? String == id }?["error"] as? String == "local clients only" },
+               "\(sent)")
+        var localSent: [[String: Any]] = []
+        let localControl = ControlSession(store: SessionStore(), isLocal: true, allowBypass: { false }) { localSent.append($0) }
+        localControl.handle(["type": "request", "id": "J3", "verb": "job_watch", "params": ["sessionId": "x", "label": "L"]])
+        record("job: job_watch needs a probe", localSent.first?["error"] as? String == "probe is required", "\(localSent)")
     }
 
     private static func wire(_ record: (String, Bool, String) -> Void) {

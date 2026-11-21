@@ -70,6 +70,9 @@ final class ControlSession {
         case "list_accounts": listAccounts(request)
         case "show_session": showSession(request)
         case "move_session": moveSession(request)
+        case "job_watch": jobWatch(request)
+        case "job_list": jobList(request)
+        case "job_clear": jobClear(request)
         case "roster_secret_changed":
             // The GUI wrote a new relay secret to the Keychain; reconnect with it. Only this
             // Mac's GUI writes that Keychain item, so a TCP client has no business asking.
@@ -766,6 +769,37 @@ final class ControlSession {
     }
 
     /// The open session a request names, or nil after answering the request with the reason.
+    /// Runs a shell command on a timer, so only this Mac's own clients may register one.
+    private func jobWatch(_ request: ControlProtocol.Request) {
+        guard isLocal else { return fail(request, "local clients only") }
+        let p = request.params
+        guard let label = (p["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty else {
+            return fail(request, "label is required")
+        }
+        guard let probe = p["probe"] as? String, !probe.trimmingCharacters(in: .whitespaces).isEmpty else {
+            return fail(request, "probe is required")
+        }
+        let host = (p["host"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let total = (p["total"] as? NSNumber)?.intValue
+        if let total, total <= 0 { return fail(request, "total must be positive") }
+        guard let session = requestedSession(request) else { return }
+        let spec = JobSpec(resumeId: session.resumeId, label: label, probe: probe, host: host, total: total,
+                           interval: (p["interval"] as? NSNumber)?.doubleValue ?? 150,
+                           stallMinutes: (p["stallMinutes"] as? NSNumber)?.doubleValue)
+        reply(request, ["job": JobWatcher.shared.watch(spec).wire])
+    }
+
+    private func jobList(_ request: ControlProtocol.Request) {
+        guard let session = requestedSession(request) else { return }
+        reply(request, ["job": JobWatcher.shared.snapshot(resumeId: session.resumeId)?.wire ?? NSNull()])
+    }
+
+    private func jobClear(_ request: ControlProtocol.Request) {
+        guard isLocal else { return fail(request, "local clients only") }
+        guard let session = requestedSession(request) else { return }
+        reply(request, ["cleared": JobWatcher.shared.clear(resumeId: session.resumeId)])
+    }
+
     private func requestedSession(_ request: ControlProtocol.Request) -> OpenSession? {
         let refs = ControlProtocol.sessionRefs(request.params)
         guard !refs.isEmpty else {
