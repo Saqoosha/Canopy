@@ -62,3 +62,17 @@ test('a refused call gets no note', async ($, on) => {
   expect(r.deny).toBe('no')
   expect(nudged(r)).toBe(false)
 })
+
+test('clearing the job brings the note back for the next one', async ($, on) => {
+  const clock = engine(on)
+  await $.tool.call({ tool: 'Bash', command: 'canopyctl job watch --session-id x --label a --probe "echo 1/2"' })
+  await $.tool.call({ tool: 'Bash', command: 'canopyctl job clear --session-id x' })
+  clock.now += 60_000
+  expect(nudged(await $.tool.call({ tool: 'Bash', command: 'nohup python train.py &' }))).toBe(true)
+})
+
+test('asking for help is not a registration', async ($, on) => {
+  engine(on)
+  await $.tool.call({ tool: 'Bash', command: 'canopyctl job watch --help' })
+  expect(nudged(await $.tool.call({ tool: 'Bash', command: 'nohup python train.py &' }))).toBe(true)
+})

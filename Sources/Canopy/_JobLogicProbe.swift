@@ -40,7 +40,8 @@ enum JobLogicProbe {
         track.record(output: nil, exitStatus: -1, at: t0.addingTimeInterval(150))
         track.record(output: nil, exitStatus: -1, at: t0.addingTimeInterval(300))
         record("review: an unknown job waits 15 min between runs",
-               !track.shouldRun(now: t0.addingTimeInterval(450)) && track.shouldRun(now: t0.addingTimeInterval(300 + 15 * 60)), "")
+               !track.shouldRun(now: t0.addingTimeInterval(450))
+                   && track.shouldRun(now: t0.addingTimeInterval(300 + JobTrack.unknownRetrySeconds)), "")
         var healthy = JobTrack(spec: remote)
         healthy.record(output: "1/10", exitStatus: 0, at: t0)
         record("review: a healthy job runs every tick", healthy.shouldRun(now: t0.addingTimeInterval(150)), "")
@@ -52,6 +53,78 @@ enum JobLogicProbe {
         record("review: a hung pipeline is killed at the timeout", hung.status == -1 && took < 5, "status=\(hung.status) took=\(took)")
         let ok = JobWatcher.runSync(["/bin/sh", "-c", "echo 3/10"], env: ProcessInfo.processInfo.environment, timeout: 5)
         record("review: a quick probe returns its output", ok.status == 0 && ok.output?.contains("3/10") == true, "\(ok)")
+        shipItFixes(record)
+    }
+
+    /// Findings from /ship-it on #434 and Canopy-Mobile#108.
+    @MainActor
+    private static func shipItFixes(_ record: (String, Bool, String) -> Void) {
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        func s(_ min: Double, _ d: Int, _ tot: Int = 100) -> JobSample { JobSample(at: t0.addingTimeInterval(min * 60), done: d, total: tot) }
+        func ev(_ ss: [JobSample], _ nowMin: Double, failures: Int = 0, previous: JobState? = nil) -> JobSnapshot {
+            JobEstimator.evaluate(label: "x", samples: ss, failures: failures, now: t0.addingTimeInterval(nowMin * 60),
+                                  stallMinutes: nil, previous: previous)
+        }
+        // Registered 19 min into a 20 min unit: the first move says nothing about the rate.
+        let oneMove = ev([s(0, 3), s(1, 4)], 2)
+        record("ship: one move after registering is still measuring", oneMove.state == .measuring && oneMove.etaAt == nil, "\(oneMove)")
+        record("ship: one move does not set a 15 min stall threshold", ev([s(0, 3), s(1, 4)], 17).state == .measuring, "")
+        // 15 min window: fast long ago, slow lately.
+        let mixed = ev([s(0, 0), s(1, 30), s(2, 60), s(30, 61), s(40, 62), s(50, 63)], 50)
+        let expected = t0.addingTimeInterval(50 * 60 + Double(100 - 63) * 10 * 60)
+        record("ship: the rate comes from the last 15 min", mixed.etaAt.map { abs($0.timeIntervalSince(expected)) < 120 } == true, "\(mixed)")
+        // 15 min floor over a fast median.
+        let fast = ev([s(0, 0), s(2.5, 1), s(5, 2), s(7.5, 3)], 17.5)
+        record("ship: the stall floor holds over fast units", fast.state == .running, "\(fast)")
+        // A stalled job stays stalled through one failed reading.
+        let still = ev([s(0, 300, 793), s(5, 340, 793), s(10, 380, 793)], 30, failures: 1, previous: .stalled)
+        record("ship: one failed reading keeps a stall", still.state == .stalled && still.etaAt == nil, "\(still)")
+        // Counts that would overflow a date are not readings.
+        record("ship: an implausible count is not a reading",
+               JobEstimator.parse("9223372036854775000/9223372036854775807", total: nil) == nil
+                   && JobEstimator.parse("5/0", total: nil) == nil, "")
+
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+        let now = cal.date(from: DateComponents(year: 2026, month: 11, day: 21, hour: 21))!
+        let later = cal.date(from: DateComponents(year: 2026, month: 11, day: 23, hour: 13, minute: 5))!
+        record("ship: two days out shows the date", JobDisplay.timeLabel(later, now: now, calendar: cal) == "11/23 13:05",
+               JobDisplay.timeLabel(later, now: now, calendar: cal))
+
+        let stalled = JobSnapshot(label: "h7", done: 680, total: 1077, etaAt: nil, state: .stalled, stalledSince: t0)
+        record("ship: an asking row keeps its question over a stall",
+               JobDisplay.secondLine(.asking, job: stalled, attentionLine: "Bash: make") == "Bash: make", "")
+        record("ship: an idle row with a stall shows the count",
+               JobDisplay.secondLine(.idle, job: stalled, attentionLine: nil) == "680/1077 で止まっている", "")
+        record("ship: an unread row shows its line", JobDisplay.secondLine(.unread, job: nil, attentionLine: "done") == "done", "")
+        record("ship: an idle row shows nothing", JobDisplay.secondLine(.idle, job: nil, attentionLine: "x") == nil, "")
+        let empty = JobSnapshot(label: "IG", done: 0, total: 0, etaAt: nil, state: .measuring, stalledSince: nil)
+        record("ship: hover without a reading has no 0/0", JobDisplay.help(empty, now: t0) == "IG · 計測中", JobDisplay.help(empty, now: t0))
+
+        let localSpec = JobSpec(resumeId: "r", label: "L", probe: "p", host: nil, total: nil, interval: 150, stallMinutes: nil)
+        var local = JobTrack(spec: localSpec)
+        local.record(output: "grep: log: No such file or directory\n", exitStatus: 2, at: t0)
+        record("ship: a failed local probe names why", local.note == "exit 2: grep: log: No such file or directory", "\(String(describing: local.note))")
+        local.record(output: "starting\n", exitStatus: 0, at: t0)
+        record("ship: output without a count says so", local.note == "出力に N/M が無い", "\(String(describing: local.note))")
+        let orphan = JobWatcher.runSync(["/bin/sh", "-c", "sleep 30 & echo 1/10"], env: ProcessInfo.processInfo.environment, timeout: 1)
+        record("ship: a background child holding the pipe does not outlast the timeout",
+               orphan.status == -1 || orphan.output?.contains("1/10") == true, "\(orphan)")
+        let big = JobWatcher.runSync(["/bin/sh", "-c", "yes"], env: ProcessInfo.processInfo.environment, timeout: 5)
+        record("ship: endless output is cut off", big.status == JobWatcher.tooMuchOutput, "status=\(big.status)")
+
+        for (host, ok) in [("rt4090", true), ("me@studio.local", true), ("-oProxyCommand=x", false), ("a b", false)] {
+            record("ship: host \(host) is \(ok ? "accepted" : "refused")", JobSpec.isValidHost(host) == ok, "")
+        }
+        var sent: [[String: Any]] = []
+        let control = ControlSession(store: SessionStore(), isLocal: true, allowBypass: { false }) { sent.append($0) }
+        for (id, extra) in [("V1", ["stallMinutes": 0] as [String: Any]), ("V2", ["host": "-oProxyCommand=x"])] {
+            control.handle(["type": "request", "id": id, "verb": "job_watch",
+                            "params": ["sessionId": "x", "label": "L", "probe": "p"].merging(extra) { $1 }])
+        }
+        func err(_ id: String) -> String? { sent.first { $0["id"] as? String == id }?["error"] as? String }
+        record("ship: job_watch refuses a non-positive stallMinutes", err("V1") == "stallMinutes must be positive", "\(sent)")
+        record("ship: job_watch refuses a host that is an ssh option", err("V2") == "host is not a host name", "\(sent)")
     }
 
     @MainActor
@@ -147,12 +220,13 @@ enum JobLogicProbe {
     @MainActor
     private static func watcher(_ record: (String, Bool, String) -> Void) {
         let local = JobSpec(resumeId: "r", label: "L", probe: "echo 3/10", host: nil, total: nil, interval: 150, stallMinutes: nil)
-        record("job: a local probe runs under sh -c", JobWatcher.command(for: local) == ["/bin/sh", "-c", "echo 3/10"],
+        record("job: a local probe runs under sh -c with pipefail",
+               JobWatcher.command(for: local) == ["/bin/sh", "-c", "set -o pipefail; echo 3/10"],
                "\(JobWatcher.command(for: local))")
         let remote = JobSpec(resumeId: "r", label: "L", probe: "tail -1 log", host: "rt4090", total: nil, interval: 150, stallMinutes: nil)
         let argv = JobWatcher.command(for: remote)
         record("job: a remote probe is ssh with BatchMode, ConnectTimeout=10 and ControlPersist",
-               argv.first == "/usr/bin/ssh" && argv.suffix(2) == ["rt4090", "tail -1 log"]
+               argv.first == "/usr/bin/ssh" && argv.suffix(3) == ["--", "rt4090", "tail -1 log"]
                    && ["BatchMode=yes", "ConnectTimeout=10", "ControlMaster=auto", "ControlPersist=10m"].allSatisfy(argv.contains)
                    && argv.contains { $0.hasPrefix("ControlPath=") },
                "\(argv)")
@@ -168,7 +242,7 @@ enum JobLogicProbe {
         track.record(output: "[3/10]\n", exitStatus: 0, at: t0)
         track.record(output: "", exitStatus: 255, at: t0.addingTimeInterval(150))
         record("job: a failed run counts a failure and keeps the samples",
-               track.failures == 1 && track.samples.count == 1 && track.note == "ssh の認証に失敗", "\(track)")
+               track.failures == 1 && track.samples.count == 1 && track.note == "ssh の接続か認証に失敗", "\(track)")
         track.record(output: "[4/10]", exitStatus: 0, at: t0.addingTimeInterval(300))
         record("job: a parsed run resets failures and the note",
                track.failures == 0 && track.note == nil && track.samples.last?.done == 4, "\(track)")
@@ -178,9 +252,14 @@ enum JobLogicProbe {
         let restored = (try? JSONEncoder().encode([track])).flatMap { try? JSONDecoder().decode([JobTrack].self, from: $0) }
         record("job: tracks persist and restore", restored == [track], "")
         var old = JobTrack(spec: local)
-        old.record(output: "1/10", exitStatus: 0, at: t0)
-        old.record(output: "2/10", exitStatus: 0, at: t0.addingTimeInterval(5 * 3600))
-        record("job: samples older than 4 h are dropped", old.samples.count == 1, "\(old.samples)")
+        let hour: TimeInterval = 3600
+        // Hourly readings 0 h…7 h, all 1/10: the window (keepSeconds) keeps 3 h…7 h, plus the 0 h reading,
+        // which is where the count last changed.
+        for h in 0...7 { old.record(output: "1/10", exitStatus: 0, at: t0.addingTimeInterval(Double(h) * hour)) }
+        let windowReadings = Int(JobTrack.keepSeconds / hour) + 1
+        record("job: unchanged readings older than the window are dropped, the last move is kept",
+               old.samples.first?.at == t0 && old.samples.count == 1 + windowReadings
+                   && old.snapshot(now: t0.addingTimeInterval(8 * hour)).stalledSince == t0, "\(old.samples.map(\.at))")
 
         var sent: [[String: Any]] = []
         let tcp = ControlSession(store: SessionStore(), isLocal: false, allowBypass: { false }) { sent.append($0) }

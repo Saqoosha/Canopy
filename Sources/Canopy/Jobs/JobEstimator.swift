@@ -36,10 +36,12 @@ struct JobSnapshot: Hashable {
 /// Pure, so the probe can pin every rule in the spec's 計測 section.
 enum JobEstimator {
     static let failureLimit = 3
+    /// Larger counts are not readings: they would overflow the finish time's unix seconds.
+    static let maxCount = 1_000_000_000
     static let windowMinutes: Double = 15
     static let stallFloorMinutes: Double = 15
     static let stallMedianFactor: Double = 3
-    /// Before the count has moved twice there is no time per unit to scale by, so a stall
+    /// Until two moves give a time per unit to scale by, a stall
     /// needs this long without a move: one epoch of a slow training run can take 20 min.
     static let firstUnitStallMinutes: Double = 60
 
@@ -47,16 +49,20 @@ enum JobEstimator {
     /// Nil when the output holds no number: a failed reading, never `done = 0`.
     static func parse(_ output: String, total: Int?) -> (done: Int, total: Int)? {
         if let total {
-            guard let match = output.matches(of: /\d+/).last, let done = Int(match.output) else { return nil }
+            guard let match = output.matches(of: /\d+/).last, let done = Int(match.output),
+                  done <= maxCount, (1...maxCount).contains(total) else { return nil }
             return (done, total)
         }
         guard let match = output.matches(of: /(\d+)\s*\/\s*(\d+)/).last,
-              let done = Int(match.output.1), let total = Int(match.output.2) else { return nil }
+              let done = Int(match.output.1), let total = Int(match.output.2),
+              done <= maxCount, (1...maxCount).contains(total) else { return nil }
         return (done, total)
     }
 
+    /// `previous` is the state the last reading produced: a failed reading keeps a stall,
+    /// and never creates one.
     static func evaluate(label: String, samples: [JobSample], failures: Int,
-                         now: Date, stallMinutes: Double?) -> JobSnapshot {
+                         now: Date, stallMinutes: Double?, previous: JobState? = nil) -> JobSnapshot {
         let current = sinceLastRestart(samples)
         guard let last = current.last else {
             return JobSnapshot(label: label, done: 0, total: 0, etaAt: nil,
@@ -69,25 +75,28 @@ enum JobEstimator {
         if failures >= failureLimit { return snapshot(.unknown) }
         if last.total > 0 && last.done >= last.total { return snapshot(.done) }
 
+        // The first reading is where watching began, not a move: a job registered late in a
+        // unit moves soon after, and that gap says nothing about the time per unit.
         let points = changePoints(current)
+        let moves = Array(points.dropFirst())
         let lastChange = points.last!
-        let gaps = zip(points, points.dropFirst()).map { $1.at.timeIntervalSince($0.at) / 60 }
+        let gaps = zip(moves, moves.dropFirst()).map { $1.at.timeIntervalSince($0.at) / 60 }
         let threshold = stallMinutes
             ?? (gaps.isEmpty ? firstUnitStallMinutes : max(stallFloorMinutes, stallMedianFactor * median(gaps)!))
-        // A failed reading says nothing about progress: only a reading that saw the count
-        // unchanged may call a stall.
-        if failures == 0 && now.timeIntervalSince(lastChange.at) >= threshold * 60 {
+        // Only a reading that saw the count unchanged may call a stall; a failed one keeps it.
+        let unmoved = now.timeIntervalSince(lastChange.at) >= threshold * 60
+        if unmoved && (failures == 0 || previous == .stalled) {
             return snapshot(.stalled, stalledSince: lastChange.at)
         }
-        guard points.count >= 2 else { return snapshot(.measuring) }
+        guard moves.count >= 2 else { return snapshot(.measuring) }
 
-        // The last 15 min, widened until it holds two points where the count moved.
-        var window = points.filter { now.timeIntervalSince($0.at) <= windowMinutes * 60 }
-        if window.count < 2 { window = Array(points.suffix(2)) }
+        // Moves in the last 15 min, or the last two when fewer fall inside.
+        var window = moves.filter { now.timeIntervalSince($0.at) <= windowMinutes * 60 }
+        if window.count < 2 { window = Array(moves.suffix(2)) }
         let first = window.first!, end = window.last!
         let rate = Double(end.done - first.done) / end.at.timeIntervalSince(first.at)
         guard rate > 0 else { return snapshot(.measuring) }
-        // From now, not from the last move: a unit still in progress is not finished yet.
+        // From now, so the time is never in the past.
         return snapshot(.running, eta: now.addingTimeInterval(Double(end.total - end.done) / rate))
     }
 

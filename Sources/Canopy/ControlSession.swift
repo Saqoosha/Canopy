@@ -768,7 +768,6 @@ final class ControlSession {
         }
     }
 
-    /// The open session a request names, or nil after answering the request with the reason.
     /// Runs a shell command on a timer, so only this Mac's own clients may register one.
     private func jobWatch(_ request: ControlProtocol.Request) {
         guard isLocal else { return fail(request, "local clients only") }
@@ -780,12 +779,18 @@ final class ControlSession {
             return fail(request, "probe is required")
         }
         let host = (p["host"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-        let total = (p["total"] as? NSNumber)?.intValue
-        if let total, total <= 0 { return fail(request, "total must be positive") }
+        if let host, !JobSpec.isValidHost(host) { return fail(request, "host is not a host name") }
+        if p["total"] != nil, (p["total"] as? NSNumber).map({ (1...JobEstimator.maxCount).contains($0.intValue) }) != true {
+            return fail(request, "total must be positive")
+        }
+        let interval = (p["interval"] as? NSNumber)?.doubleValue ?? 150
+        guard interval.isFinite else { return fail(request, "interval must be a number of seconds") }
+        let stallMinutes = (p["stallMinutes"] as? NSNumber)?.doubleValue
+        if let stallMinutes, !(stallMinutes.isFinite && stallMinutes > 0) { return fail(request, "stallMinutes must be positive") }
         guard let session = requestedSession(request) else { return }
-        let spec = JobSpec(resumeId: session.resumeId, label: label, probe: probe, host: host, total: total,
-                           interval: (p["interval"] as? NSNumber)?.doubleValue ?? 150,
-                           stallMinutes: (p["stallMinutes"] as? NSNumber)?.doubleValue)
+        let spec = JobSpec(resumeId: session.resumeId, label: String(label.prefix(JobSpec.labelLimit)), probe: probe,
+                           host: host, total: (p["total"] as? NSNumber)?.intValue,
+                           interval: interval, stallMinutes: stallMinutes)
         reply(request, ["job": JobWatcher.shared.watch(spec).wire])
     }
 
@@ -800,6 +805,7 @@ final class ControlSession {
         reply(request, ["cleared": JobWatcher.shared.clear(resumeId: session.resumeId)])
     }
 
+    /// The open session a request names, or nil after answering the request with the reason.
     private func requestedSession(_ request: ControlProtocol.Request) -> OpenSession? {
         let refs = ControlProtocol.sessionRefs(request.params)
         guard !refs.isEmpty else {

@@ -1,15 +1,27 @@
 import Foundation
 
-/// How a job looks on a sidebar row. A display-level override only: it never
-/// writes back to `SessionActivity`, so the Dock badge, the MacroPad and the
-/// roster's `state` keep their meaning (spec: 行の状態).
+/// How a job looks on a sidebar row. Colors and the stall's Needs-you group are a
+/// display-level override that never writes back to `SessionActivity`; a finished job
+/// does reach it, through the unread mark (`MacroPadUnreadTracker`).
 enum JobDisplay {
-    /// The finish time, or `明日 H:mm` when it falls on a later day.
+    /// `H:mm` today, `明日 H:mm` tomorrow, `M/d H:mm` after that.
     static func timeLabel(_ eta: Date, now: Date, calendar: Calendar = .current) -> String {
         let h = calendar.component(.hour, from: eta)
         let m = calendar.component(.minute, from: eta)
         let clock = String(format: "%d:%02d", h, m)
-        return calendar.isDate(eta, inSameDayAs: now) ? clock : "明日 \(clock)"
+        if calendar.isDate(eta, inSameDayAs: now) { return clock }
+        if let tomorrow = calendar.date(byAdding: .day, value: 1, to: now), calendar.isDate(eta, inSameDayAs: tomorrow) {
+            return "明日 \(clock)"
+        }
+        return "\(calendar.component(.month, from: eta))/\(calendar.component(.day, from: eta)) \(clock)"
+    }
+
+    /// The row's second line. A session that asks or broke keeps its own line (it ranks
+    /// above a stall); otherwise a stall shows its count; otherwise the attention line
+    /// while the row is in Needs you or Done · unseen.
+    static func secondLine(_ activity: SessionActivity, job: JobSnapshot?, attentionLine: String?) -> String? {
+        if activity != .asking, activity != .error, let job, job.state == .stalled { return stalledLine(job) }
+        return SidebarStatusGroup.showsAttentionLine(activity) ? attentionLine : nil
     }
 
     /// The row's right edge: top line, optional bottom line, and whether the top is red.
@@ -31,7 +43,8 @@ enum JobDisplay {
 
     static func help(_ job: JobSnapshot, now: Date) -> String {
         if let note = job.note { return "\(job.label) · \(note)" }
-        let count = "\(job.label) \(job.done)/\(job.total)"
+        // No reading yet: 0/0 would read as a count.
+        let count = job.total > 0 ? "\(job.label) \(job.done)/\(job.total)" : job.label
         switch job.state {
         case .running:
             guard let eta = job.etaAt else { return count }

@@ -79,7 +79,7 @@ canopyctl job clear --session-id "${CLAUDE_SESSION_ID}"
 
 - control verb は `job_watch` / `job_list` / `job_clear`。セッションは `--session-id` で決まる
 - 1 セッションにジョブは 1 本。もう一度登録すると置き換える
-- **probe の約束**：出力の最後の `(\d+)\s*/\s*(\d+)` を `done/total` とみなす。`--total` を渡したときは、出力の最後の整数を `done` とみなす（`ls | grep -c png` の形）
+- **probe の約束**：出力の最後の `(\d+)\s*/\s*(\d+)` を `done/total` とみなす。`--total` を渡したときは、出力の最後の整数を `done` とみなす（`ls | wc -l` の形。`grep -c` は 0 件で exit 1 になり、読み取りの失敗になるので使わない）
 - `--host` があれば `ssh -o BatchMode=yes -o ConnectTimeout=10 <host> <probe>` で流す。1 回の実行は 30 秒で打ち切る
 - **ssh の認証**（ぼくの判断）：probe の ssh には、セッションの Claude と同じ `SSH_AUTH_SOCK`（1Password の SSH agent）を渡す。この値は Claude Code が `~/.claude/settings.json` の `env` から自分のプロセスに読み込んでいるもので、canopyd の環境には無い。だから canopyd も probe を流すたびに同じファイルの `env.SSH_AUTH_SOCK` を読む（無ければ自分の環境の値）。1Password が承認を求める元のアプリは、セッションの ssh と同じ Canopy.app になる。ControlMaster（`ControlPersist`）で接続を使い回し、承認の回数を減らす。専用の鍵は作らない（2026-08-03 に、平文の予備の鍵を意図して消したため）。認証に失敗したら「不明」にして、ホバーに「ssh の認証に失敗」と出す
 - 登録は daemon の状態として保存し、canopyd が再起動しても残す。セッションが閉じたら消す
@@ -134,7 +134,7 @@ mockup で B2「点をリングにする」を選んだ。
 
 ## Claude への指示
 
-- **bridge skill** `skills/job-watch/SKILL.md`：10 分を超えそうなジョブを始めたら登録すること、probe の書き方（例：ログの `[328/793]`、`ls … | grep -c png` と `--total`）、`eta` と聞かれたら ssh せずに `canopyctl job list` を読むこと、SSH remote のセッションでは使えないこと。`bridgeModFiles` に載せる
+- **bridge skill** `skills/job-watch/SKILL.md`：10 分を超えそうなジョブを始めたら登録すること、probe の書き方（例：ログの `[328/793]`、`ls … | wc -l` と `--total`）、`eta` と聞かれたら ssh せずに `canopyctl job list` を読むこと、SSH remote のセッションでは使えないこと。`bridgeModFiles` に載せる
 - **hook の念押し**（`hooks/register.ts`）：Bash の呼び出しに長いジョブの起動の形（`run_in_background`、`nohup`、`setsid`、`tmux new -d`、`screen -dm`、末尾が `&` の `ssh`）があり、そのセッションにジョブが登録されていなければ、「進捗を出すなら job-watch」と一言返す。同じセッションでは 30 分に 1 回まで
 
 ## テスト

@@ -6,6 +6,8 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "JobWatcher"
 /// A job as `canopyctl job watch` registers it. Keyed by the session's `resumeId`,
 /// which survives a daemon restart.
 struct JobSpec: Codable, Equatable {
+    static let labelLimit = 60
+
     let resumeId: String
     let label: String
     /// Prints `N/M`, or with `total`, a count.
@@ -15,11 +17,22 @@ struct JobSpec: Codable, Equatable {
     let total: Int?
     let interval: TimeInterval
     let stallMinutes: Double?
+
+    /// A host name or `user@host`: never an ssh option (`-oProxyCommand=…`) or several words.
+    static func isValidHost(_ host: String) -> Bool {
+        !host.isEmpty && !host.hasPrefix("-") && !host.contains { $0.isWhitespace || $0.isNewline || $0.asciiValue.map { $0 < 32 } == true }
+    }
 }
 
 /// One job's readings. Pure, so the probe can drive it with made-up output.
 struct JobTrack: Codable, Equatable {
+    /// Unchanged readings older than this are dropped; the reading where the count last
+    /// changed is always kept, so a long stall keeps its start.
     static let keepSeconds: TimeInterval = 4 * 3600
+    static let sampleLimit = 2000
+    /// Between runs of a job whose probe keeps failing. Each ssh retry can raise a
+    /// 1Password approval nobody sees, and the 1Password prompt watcher pages for every one.
+    static let unknownRetrySeconds: TimeInterval = 15 * 60
 
     var spec: JobSpec
     var samples: [JobSample] = []
@@ -27,43 +40,60 @@ struct JobTrack: Codable, Equatable {
     var note: String?
     /// When the probe last ran, so an `unknown` job can back off.
     var lastRun: Date?
-
-    /// Between runs of a job whose probe keeps failing. Each ssh retry can raise a
-    /// 1Password approval nobody sees, and the watcher pages for every one.
-    static let unknownRetrySeconds: TimeInterval = 15 * 60
+    /// The state the last reading produced: a failed reading keeps a stall, and pushes
+    /// fire on a change from it, across daemon restarts too.
+    var lastState: JobState?
 
     init(spec: JobSpec) { self.spec = spec }
 
-    /// Folds one probe run in. Output without a count is a failure, never `done = 0`.
+    /// False while an `unknown` job is inside its backoff.
     func shouldRun(now: Date) -> Bool {
         guard failures >= JobEstimator.failureLimit, let lastRun else { return true }
         return now.timeIntervalSince(lastRun) >= Self.unknownRetrySeconds
     }
 
+    /// Folds one probe run in. Output without a count is a failure, never `done = 0`.
     mutating func record(output: String?, exitStatus: Int32, at now: Date) {
         lastRun = now
         if exitStatus == 0, let output, let count = JobEstimator.parse(output, total: spec.total) {
             samples.append(JobSample(at: now, done: count.done, total: count.total))
-            samples.removeAll { now.timeIntervalSince($0.at) > Self.keepSeconds }
+            prune(now: now)
             failures = 0
             note = nil
         } else {
             failures += 1
-            // ssh itself exits 255; with BatchMode that is almost always auth or reachability.
-            // -1 is our timeout: over ssh, most likely a 1Password approval nobody saw.
-            switch (spec.host != nil, exitStatus) {
-            case (true, 255): note = "ssh の認証に失敗"
-            case (true, -1): note = "ssh が応答しない（1Password の承認待ちかも）"
-            default: note = nil
-            }
+            note = Self.failureNote(output: output, exitStatus: exitStatus, overSSH: spec.host != nil)
         }
     }
 
     func snapshot(now: Date) -> JobSnapshot {
         var snap = JobEstimator.evaluate(label: spec.label, samples: samples, failures: failures,
-                                         now: now, stallMinutes: spec.stallMinutes)
+                                         now: now, stallMinutes: spec.stallMinutes, previous: lastState)
         snap.note = note
         return snap
+    }
+
+    private mutating func prune(now: Date) {
+        var kept: [JobSample] = []
+        for (i, sample) in samples.enumerated() {
+            let changed = i == 0 || samples[i - 1].done != sample.done || samples[i - 1].total != sample.total
+            if changed || now.timeIntervalSince(sample.at) <= Self.keepSeconds { kept.append(sample) }
+        }
+        samples = Array(kept.suffix(Self.sampleLimit))
+    }
+
+    /// Why a reading is missing, for the hover and `job list`: the cause, then the probe's last line.
+    static func failureNote(output: String?, exitStatus: Int32, overSSH: Bool) -> String {
+        let line = output?.split(whereSeparator: \.isNewline).last.map { String($0.prefix(80)) }
+        switch exitStatus {
+        case JobWatcher.timedOut:
+            return overSSH ? "ssh が応答しない（1Password の承認待ちかも）" : "30 秒で終わらない"
+        case JobWatcher.launchFailed: return "起動できない"
+        case JobWatcher.tooMuchOutput: return "出力が多すぎる"
+        case 0: return "出力に N/M が無い"
+        case 255 where overSSH: return "ssh の接続か認証に失敗" + (line.map { ": \($0)" } ?? "")
+        default: return "exit \(exitStatus)" + (line.map { ": \($0)" } ?? "")
+        }
     }
 }
 
@@ -83,7 +113,6 @@ final class JobWatcher {
     private var tracks: [String: JobTrack] = [:]
     private var timers: [String: Timer] = [:]
     private var running: Set<String> = []
-    private var lastState: [String: JobState] = [:]
     private var missingSince: [String: Date] = [:]
 
     private var persistURL: URL {
@@ -91,22 +120,29 @@ final class JobWatcher {
             .appendingPathComponent("Library/Application Support/Canopy/jobs-\(Bundle.main.bundleIdentifier ?? "Canopy").json")
     }
 
-    /// Restores saved jobs. Called once by the daemon.
+    /// Restores saved jobs. Called once by the daemon. A file that cannot be read is moved aside
+    /// and logged rather than silently replaced by the next save.
     func start(store: SessionStore) {
         self.store = store
-        guard let data = try? Data(contentsOf: persistURL),
-              let saved = try? JSONDecoder().decode([JobTrack].self, from: data) else { return }
-        for track in saved {
-            tracks[track.spec.resumeId] = track
-            schedule(track.spec)
+        guard FileManager.default.fileExists(atPath: persistURL.path) else { return }
+        do {
+            let saved = try JSONDecoder().decode([JobTrack].self, from: Data(contentsOf: persistURL))
+            for track in saved {
+                tracks[track.spec.resumeId] = track
+                schedule(track.spec)
+            }
+            logger.notice("restored \(saved.count) job(s)")
+        } catch {
+            let aside = persistURL.appendingPathExtension("bad")
+            try? FileManager.default.removeItem(at: aside)
+            try? FileManager.default.moveItem(at: persistURL, to: aside)
+            logger.error("jobs file unreadable, moved to \(aside.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
-        logger.notice("restored \(saved.count) job(s)")
     }
 
     @discardableResult
     func watch(_ spec: JobSpec) -> JobSnapshot {
         tracks[spec.resumeId] = JobTrack(spec: spec)
-        lastState[spec.resumeId] = nil
         missingSince[spec.resumeId] = nil
         save()
         schedule(spec)
@@ -119,7 +155,6 @@ final class JobWatcher {
     func clear(resumeId: String) -> Bool {
         guard tracks.removeValue(forKey: resumeId) != nil else { return false }
         timers.removeValue(forKey: resumeId)?.invalidate()
-        lastState[resumeId] = nil
         missingSince[resumeId] = nil
         save()
         session(resumeId)?.job = nil
@@ -133,12 +168,13 @@ final class JobWatcher {
     // MARK: Probe command
 
     static func command(for spec: JobSpec) -> [String] {
-        guard let host = spec.host else { return ["/bin/sh", "-c", spec.probe] }
+        // pipefail: `ls missing | wc -l` prints 0 and would otherwise read as a count.
+        guard let host = spec.host else { return ["/bin/sh", "-c", "set -o pipefail; " + spec.probe] }
         let cm = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".ssh/cm").path
         return ["/usr/bin/ssh",
                 "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
                 "-o", "ControlMaster=auto", "-o", "ControlPath=\(cm)/%r@%h:%p", "-o", "ControlPersist=10m",
-                host, spec.probe]
+                "--", host, spec.probe]
     }
 
     /// The agent socket the sessions' ssh uses: Claude Code reads it from settings.json's
@@ -161,7 +197,8 @@ final class JobWatcher {
     }
 
     private func tick(_ id: String) {
-        guard let track = tracks[id], !running.contains(id), track.shouldRun(now: Date()) else { return }
+        guard let track = tracks[id], !running.contains(id) else { return }
+        // A closed session's job goes first, finished or backing off included.
         if session(id) == nil {
             let since = missingSince[id] ?? Date()
             missingSince[id] = since
@@ -169,6 +206,8 @@ final class JobWatcher {
             return
         }
         missingSince[id] = nil
+        // A finished count will not move again: keep the job for the row, stop asking.
+        guard track.lastState != .done, track.shouldRun(now: Date()) else { return }
         running.insert(id)
         let argv = Self.command(for: track.spec)
         var env = ProcessInfo.processInfo.environment
@@ -188,18 +227,17 @@ final class JobWatcher {
 
     private func finish(_ id: String, spec: JobSpec, output: String?, status: Int32) {
         running.remove(id)
-        // Re-registered or cleared while the probe ran: this reading belongs to the old job.
-        guard var track = tracks[id], track.spec == spec else { return }
+        guard var track = tracks[id] else { return }
+        // Re-registered while this probe ran: the reading is the old job's; read the new one now.
+        guard track.spec == spec else { tick(id); return }
+        let previous = track.lastState
         track.record(output: output, exitStatus: status, at: Date())
+        let snap = track.snapshot(now: Date())
+        track.lastState = snap.state
         tracks[id] = track
         save()
-        let snap = track.snapshot(now: Date())
         guard let session = session(id) else { return }
         if session.job != snap { session.job = snap }
-        let previous = lastState[id]
-        lastState[id] = snap.state
-        // Finished: the count will not move again, so stop asking.
-        if snap.state == .done { timers.removeValue(forKey: id)?.invalidate() }
         if Self.shouldPush(from: previous, to: snap.state), let text = Self.pushText(snap) {
             RosterNotifier.post(kind: snap.state == .done ? .jobDone : .jobStalled,
                                 sessionId: session.id.uuidString, resumeId: session.resumeId,
@@ -209,7 +247,7 @@ final class JobWatcher {
     }
 
     /// One push when a job moves into `stalled` or `done`; none on its first reading,
-    /// so a restored or re-registered job does not repeat an old push.
+    /// so a re-registered job does not repeat an old push.
     static func shouldPush(from previous: JobState?, to next: JobState) -> Bool {
         guard let previous, previous != next else { return false }
         return next == .stalled || next == .done
@@ -232,9 +270,16 @@ final class JobWatcher {
         }
     }
 
-    /// Runs `argv` and waits. Past `timeout` the process and its children are killed and the
-    /// status is -1: a pipeline's children hold the pipe open, so killing only `sh` would
-    /// leave the read blocked and the job frozen on its last reading.
+    /// Statuses `runSync` returns in place of an exit code.
+    nonisolated static let timedOut: Int32 = -1
+    nonisolated static let launchFailed: Int32 = -2
+    nonisolated static let tooMuchOutput: Int32 = -3
+    nonisolated static let outputLimit = 1 << 20
+
+    /// Runs `argv` with stdout and stderr in one pipe and waits for that pipe to close, at most
+    /// `timeout`. The wait is on the pipe, not the shell: a child left behind (`sleep 600 &`, a
+    /// pipeline stage) keeps it open after `sh` exits. Past the timeout or `outputLimit`, the
+    /// process tree is killed and the read abandoned.
     nonisolated static func runSync(_ argv: [String], env: [String: String], timeout: TimeInterval)
         -> (output: String?, status: Int32) {
         let process = Process()
@@ -245,27 +290,58 @@ final class JobWatcher {
         process.standardInput = FileHandle.nullDevice
         let pipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do { try process.run() } catch { return (nil, -1) }
-        let pid = process.processIdentifier
-        let timedOut = OSAllocatedUnfairLock(initialState: false)
-        let killer = DispatchWorkItem {
-            guard process.isRunning else { return }
-            timedOut.withLock { $0 = true }
-            // Children first (by parent pid, never by name), then the shell.
-            let pkill = Process()
-            pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-            pkill.arguments = ["-KILL", "-P", String(pid)]
-            try? pkill.run()
-            pkill.waitUntilExit()
-            kill(pid, SIGKILL)
+        process.standardError = pipe
+        do { try process.run() } catch {
+            logger.error("probe did not start: \(error.localizedDescription, privacy: .public)")
+            return (nil, launchFailed)
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let pid = process.processIdentifier
+        let buffer = OSAllocatedUnfairLock(initialState: (data: Data(), overflow: false))
+        let closed = DispatchSemaphore(value: 0)
+        let reader = pipe.fileHandleForReading
+        reader.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            let stop = buffer.withLock { state -> Bool in
+                if chunk.isEmpty { return true }
+                state.data.append(chunk)
+                if state.data.count > outputLimit { state.overflow = true; return true }
+                return false
+            }
+            if stop { handle.readabilityHandler = nil; closed.signal() }
+        }
+        let finished = closed.wait(timeout: .now() + timeout) == .success
+        let overflow = buffer.withLock { $0.overflow }
+        if !finished || overflow {
+            reader.readabilityHandler = nil
+            killTree(pid)
+        }
         process.waitUntilExit()
-        killer.cancel()
-        let output = String(decoding: data.suffix(64 * 1024), as: UTF8.self)
-        return timedOut.withLock { $0 } ? (output, -1) : (output, process.terminationStatus)
+        let output = buffer.withLock { String(decoding: $0.data.suffix(64 * 1024), as: UTF8.self) }
+        if overflow { return (output, tooMuchOutput) }
+        if !finished { return (output, timedOut) }
+        return (output, process.terminationStatus)
+    }
+
+    /// Kills `pid`'s descendants (found by parent pid, never by name), then `pid`, then its
+    /// process group when it leads one, which also reaches children `sh` left behind.
+    nonisolated private static func killTree(_ pid: pid_t) {
+        let leadsGroup = getpgid(pid) == pid
+        var queue = [pid], all: [pid_t] = []
+        while let next = queue.popLast() {
+            all.append(next)
+            let pgrep = Process()
+            pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            pgrep.arguments = ["-P", String(next)]
+            let out = Pipe()
+            pgrep.standardOutput = out
+            pgrep.standardError = FileHandle.nullDevice
+            guard (try? pgrep.run()) != nil else { continue }
+            pgrep.waitUntilExit()
+            let text = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            queue += text.split(whereSeparator: \.isNewline).compactMap { pid_t($0) }
+        }
+        for victim in all.reversed() { kill(victim, SIGKILL) }
+        if leadsGroup { killpg(pid, SIGKILL) }
     }
 
     private func session(_ resumeId: String) -> OpenSession? {
@@ -276,6 +352,8 @@ final class JobWatcher {
         do {
             let data = try JSONEncoder().encode(Array(tracks.values))
             try data.write(to: persistURL, options: .atomic)
+            // Probes are commands canopyd runs: no other process should read or edit them.
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: persistURL.path)
         } catch {
             logger.error("saving jobs failed: \(error.localizedDescription, privacy: .public)")
         }

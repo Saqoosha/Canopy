@@ -33,7 +33,8 @@ export const LONG_JOB = /\bnohup\b|\bsetsid\b|\btmux\s+new(?:-session)?\b[^|;]*\
 export const JOB_NUDGE = 'This looks like a long-running job. If it reports progress as N/M (or a count with a known total), '
   + 'register it with the job-watch skill so Canopy shows its finish time.'
 const JOB_NUDGE_EVERY_MS = 30 * 60_000
-const REGISTERS_JOB = /\bcanopyctl\b[^|;]*\bjob\s+watch\b/
+const REGISTERS_JOB = /\bcanopyctl\b[^|;]*\bjob\s+watch\b(?![^|;]*\s(?:-h|--help)\b)/
+const CLEARS_JOB = /\bcanopyctl\b[^|;]*\bjob\s+clear\b/
 
 // Commands that delete a worktree folder: git's own removal, or deleting it outright.
 const REMOVES = /\bworktree\s+remove\b|\brm\s+(?:-\w+\s+)*-\w*[rR]/
@@ -836,6 +837,10 @@ export function register(on) {
     const command = e.command ?? ''
     if (r?.deny || r?.isError) return r
     const sid = await $.session.id()
+    if (CLEARS_JOB.test(command)) {
+      await $.store.delete(`job-registered:${sid}`).catch(() => {})
+      return r
+    }
     if (REGISTERS_JOB.test(command)) {
       await $.store.set(`job-registered:${sid}`, true).catch(() => {})
       return r

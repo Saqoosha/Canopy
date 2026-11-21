@@ -1122,9 +1122,8 @@ private struct SidebarRowView: View {
 
     private var attentionLine: String? {
         guard case .open(let session) = row else { return nil }
-        if let job = session.job, job.state == .stalled { return JobDisplay.stalledLine(job) }
-        guard SidebarStatusGroup.showsAttentionLine(SessionActivity.of(session, isUnread: isUnread)) else { return nil }
-        return session.attentionLine
+        return JobDisplay.secondLine(SessionActivity.of(session, isUnread: isUnread), job: session.job,
+                                     attentionLine: session.attentionLine)
     }
 
     private var subtitleColor: Color { .secondary }
@@ -1181,11 +1180,7 @@ private struct SidebarRowView: View {
     }
 }
 
-/// Drops into the List's background hierarchy and scrolls the enclosing
-/// NSScrollView to the top whenever `trigger` increases. Side-steps
-/// `ScrollViewReader.scrollTo`, which has a precondition crash if the
-/// target id isn't already laid out — racy for freshly inserted rows.
-/// The activity dot inside a progress ring while the session has a job running.
+/// The activity dot inside a progress ring while the session has an unfinished job.
 /// Both take the row's color from `JobDisplay.ringActivity`, so the ring never
 /// introduces a color of its own.
 private struct JobRingDot: View {
@@ -1210,6 +1205,10 @@ private struct JobRingDot: View {
     }
 }
 
+/// Drops into the List's background hierarchy and scrolls the enclosing
+/// NSScrollView to the top whenever `trigger` increases. Side-steps
+/// `ScrollViewReader.scrollTo`, which has a precondition crash if the
+/// target id isn't already laid out — racy for freshly inserted rows.
 private struct ListScrollToTop: NSViewRepresentable {
     let trigger: Int
 

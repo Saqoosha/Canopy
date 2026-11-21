@@ -5,8 +5,8 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "DockBadge")
 
 /// Puts the number of sessions that are owed a look on the Dock icon: the
 /// ones asking for permission or an answer, and the ones that finished a turn
-/// nobody has acknowledged yet. Both come from `SessionActivity`, so the
-/// count is exactly the orange and green dots in the sidebar.
+/// nobody has acknowledged yet, both from `SessionActivity`. A job's ring may
+/// recolor a dot (`JobDisplay.ringActivity`) without changing this count.
 ///
 /// Reads `unreadSessionIds`, which `MacroPadController` maintains whether or
 /// not a pad is plugged in, so the badge needs no tracker of its own.
