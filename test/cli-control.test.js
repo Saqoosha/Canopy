@@ -230,8 +230,25 @@ test("before any user message, a running spare in untrusted-start is passed over
   assert.strictEqual(session.stdin.lines.length, 1);
   assert.deepStrictEqual(spare.stdin.lines, []);
   session.exitCode = 0;
-  control.sendSetCwd({ requestId: "b", path: "/tmp/x" }, () => {});
-  assert.strictEqual(spare.stdin.lines.length, 1);
+  const results = [];
+  control.sendSetCwd({ requestId: "b", path: "/tmp/x" }, (result) => results.push(result));
+  assert.match(results[0].error, /no running CLI/);
+  assert.deepStrictEqual(spare.stdin.lines, []);
+  // Given a conversation, a CLI in untrusted-start is the session's after all.
+  spare.stdin.write('{"type":"user"}\n');
+  control.sendSetCwd({ requestId: "c", path: "/tmp/x" }, () => {});
+  assert.strictEqual(spare.stdin.lines.length, 2);
+});
+
+test("a user line written in pieces still marks the session", () => {
+  const control = freshControl();
+  const session = runningCli(control);
+  const other = runningCli(control);
+  session.stdin.write('{"type":"user","message":{"content":"');
+  session.stdin.write('long"}}\n');
+  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, () => {});
+  assert.strictEqual(session.stdin.lines.length, 3);
+  assert.deepStrictEqual(other.stdin.lines, []);
 });
 
 test("the wrapped write keeps the stream's return value", () => {
