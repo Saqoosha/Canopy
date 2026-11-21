@@ -70,6 +70,7 @@ struct JobTrack: Codable, Equatable {
         var snap = JobEstimator.evaluate(label: spec.label, samples: samples, failures: failures,
                                          now: now, stallMinutes: spec.stallMinutes, previous: lastState)
         snap.note = note
+        snap.lastReadingAt = samples.last?.at
         return snap
     }
 
@@ -211,6 +212,9 @@ final class JobWatcher {
             return
         }
         missingSince[id] = nil
+        // A session reopened after a daemon restart has no job until its next reading; the
+        // reaper's hold needs it now.
+        if let session = session(id), session.job == nil { session.job = track.snapshot(now: Date()) }
         // A finished count will not move again: keep the job for the row, stop asking.
         guard track.lastState != .done, track.shouldRun(now: Date()) else { return }
         running.insert(id)
@@ -252,6 +256,23 @@ final class JobWatcher {
         }
     }
 
+    /// A stall, or a probe that keeps failing, holds its session this long; past it the job is
+    /// taken as dead.
+    nonisolated static let stalledHoldSeconds: TimeInterval = 6 * 3600
+
+    /// Whether a session's job keeps the daemon from reaping it: one that is measuring or
+    /// running, stalled for under `stalledHoldSeconds`, or `unknown` with a good reading in that
+    /// time (a short outage, such as an unseen 1Password prompt, must not drop the job). Never `done`.
+    nonisolated static func holdsSession(_ job: JobSnapshot?, now: Date = Date()) -> Bool {
+        guard let job else { return false }
+        switch job.state {
+        case .measuring, .running: return true
+        case .stalled: return job.stalledSince.map { now.timeIntervalSince($0) < stalledHoldSeconds } ?? true
+        case .unknown: return job.lastReadingAt.map { now.timeIntervalSince($0) < stalledHoldSeconds } ?? false
+        case .done: return false
+        }
+    }
+
     /// One push when a job moves into `stalled` or `done`; none on its first reading,
     /// so a re-registered job does not repeat an old push.
     static func shouldPush(from previous: JobState?, to next: JobState) -> Bool {
@@ -282,10 +303,10 @@ final class JobWatcher {
     nonisolated static let tooMuchOutput: Int32 = -3
     nonisolated static let outputLimit = 1 << 20
 
-    /// Runs `argv` and waits for its stdout pipe to close, at most
-    /// `timeout`. The wait is on the pipe, not the shell: a child left behind (`sleep 600 &`, a
-    /// pipeline stage) keeps it open after `sh` exits. Past the timeout or `outputLimit`, the
-    /// process tree is killed and the read abandoned.
+    /// Runs `argv` and waits for its stdout pipe to close and then for it to exit, both within
+    /// one `timeout`. The pipe can close first (`exec >/dev/null; sleep 600`) or last (a child
+    /// left behind holds it after `sh` exits). Past the timeout or `outputLimit`, the process
+    /// tree is killed and the read abandoned.
     nonisolated static func runSync(_ argv: [String], env: [String: String], timeout: TimeInterval)
         -> (output: String?, status: Int32) {
         let process = Process()
@@ -298,6 +319,9 @@ final class JobWatcher {
         process.standardOutput = pipe
         // Not merged into the pipe: a warning after the count would be read as the count.
         process.standardError = FileHandle.nullDevice
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        let deadline = DispatchTime.now() + timeout
         do { try process.run() } catch {
             logger.error("probe did not start: \(error.localizedDescription, privacy: .public)")
             return (nil, launchFailed)
@@ -319,11 +343,19 @@ final class JobWatcher {
             }
             if stop { handle.readabilityHandler = nil; closed.signal() }
         }
-        let finished = closed.wait(timeout: .now() + timeout) == .success
+        let pipeClosed = closed.wait(timeout: deadline) == .success
         let overflow = buffer.withLock { $0.overflow }
+        let finished = pipeClosed && (overflow || exited.wait(timeout: deadline) == .success)
         if !finished || overflow {
             reader.readabilityHandler = nil
             killTree(pid, group: group == pid ? group : nil)
+            // A process stuck in the kernel (a hung network mount) outlives SIGKILL: give up on it.
+            if exited.wait(timeout: .now() + 5) == .timedOut {
+                logger.error("probe pid \(pid) did not exit after SIGKILL")
+                try? reader.close()
+                return (buffer.withLock { String(decoding: $0.data.suffix(64 * 1024), as: UTF8.self) },
+                        overflow ? tooMuchOutput : timedOut)
+            }
         }
         process.waitUntilExit()
         let output = buffer.withLock { String(decoding: $0.data.suffix(64 * 1024), as: UTF8.self) }

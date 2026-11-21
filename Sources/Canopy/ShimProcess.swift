@@ -120,8 +120,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// The phone holds its sessions until Stop; a control-opened one is held only
     /// while a `listen` covers it, so a client that went away does not leave it running.
-    nonisolated static func reaperHolds(heldByPhone: Bool, openedByControl: Bool, watched: Bool) -> Bool {
-        heldByPhone || (openedByControl && watched)
+    /// An unfinished registered job holds its session too: reaping it would drop the job.
+    nonisolated static func reaperHolds(heldByPhone: Bool, openedByControl: Bool, watched: Bool,
+                                        activeJob: Bool) -> Bool {
+        heldByPhone || (openedByControl && watched) || activeJob
     }
 
     var reaperInputs: SessionReaper.Inputs {
@@ -135,7 +137,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                                        openedByControl: boundSession?.openedByControl ?? false,
                                        watched: boundSession.map {
                                            ControlEventLog.shared.watch.isWatched($0.id.uuidString, now: Date())
-                                       } ?? false))
+                                       } ?? false,
+                                       activeJob: JobWatcher.holdsSession(boundSession?.job)))
     }
 
     /// A remote client holds an upgrade only when it will not re-attach by itself;
