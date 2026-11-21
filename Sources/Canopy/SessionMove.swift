@@ -572,4 +572,60 @@ enum SessionMove {
         CFUserNotificationDisplayNotice(0, CFOptionFlags(kCFUserNotificationCautionAlertLevel), nil, nil, nil,
                                         "“\(sessionTitle)” was not moved" as CFString, reason as CFString, nil)
     }
+
+    /// Moves the daemon was still waiting on when it restarted, asked for again by the next
+    /// daemon (`ShimProcess.askCarriedMoveAgain`). Without it an update restart dropped a move
+    /// that was waiting on background tasks, and nobody was told (2026-11-21).
+    struct CarriedMoves: Codable, Equatable {
+        /// Resume id, lowercased, to the folder asked for.
+        var paths: [String: String]
+        var savedAt: Date
+
+        /// The held sessions' window: an older file is from a restart whose daemon never came up.
+        static let maxAge = DaemonHeldSessions.maxAge
+
+        /// Filled at daemon start, emptied as each session's CLI starts.
+        @MainActor static var waiting: [String: String] = [:]
+
+        /// `pathOf` is a parameter so the probe needs no running shim.
+        static func capture(_ sessions: [OpenSession], now: Date = Date(),
+                            pathOf: (OpenSession) -> String?) -> CarriedMoves {
+            var paths: [String: String] = [:]
+            for session in sessions {
+                guard case .local = session.origin, let path = pathOf(session) else { continue }
+                paths[session.resumeId.lowercased()] = path
+            }
+            return CarriedMoves(paths: paths, savedAt: now)
+        }
+
+        static var fileURL: URL {
+            DaemonHeldSessions.fileURL.deletingLastPathComponent()
+                .appendingPathComponent("daemon-moves-\(Bundle.main.bundleIdentifier ?? "sh.saqoo.Canopy").json")
+        }
+
+        func save(to url: URL = fileURL) {
+            guard !paths.isEmpty else { return }
+            do {
+                try JSONEncoder().encode(self).write(to: url, options: .atomic)
+                logger.notice("saved \(paths.count, privacy: .public) waiting move(s) for the restart")
+            } catch {
+                logger.error("could not save waiting moves: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        /// Read and delete, as `DaemonHeldSessions.consume` does.
+        static func consume(from url: URL = fileURL, now: Date = Date()) -> CarriedMoves? {
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            try? FileManager.default.removeItem(at: url)
+            guard let carried = try? JSONDecoder().decode(CarriedMoves.self, from: data) else {
+                logger.error("waiting moves file unreadable")
+                return nil
+            }
+            guard now.timeIntervalSince(carried.savedAt) <= maxAge else {
+                logger.notice("dropped \(carried.paths.count, privacy: .public) waiting move(s) from an old restart")
+                return nil
+            }
+            return carried
+        }
+    }
 }

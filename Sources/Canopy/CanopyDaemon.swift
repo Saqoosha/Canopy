@@ -257,6 +257,8 @@ final class DaemonDelegate {
         // Proxies handed out before a restart keep answering (PeerRelay); reopening one unlinks the live socket.
         PeerRelay.shared.restore()
         reloadConfig()
+        // Before any shim starts: each asks for its move at its CLI's `init`.
+        SessionMove.CarriedMoves.waiting = SessionMove.CarriedMoves.consume()?.paths ?? [:]
         restoreHeldSessions()
         // The GUI changes these settings in another process; follow them.
         configTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
@@ -528,6 +530,11 @@ final class DaemonDelegate {
         // Asks for a clean close; the process may exit before the frame is flushed.
         rosterPublisher?.stop()
         let held = saveSessions(carrying: carryingSessions)
+        if carryingSessions {
+            SessionMove.CarriedMoves.capture(store.openSessions) { $0.shim?.pendingMovePath }.save()
+        } else {
+            try? FileManager.default.removeItem(at: SessionMove.CarriedMoves.fileURL)
+        }
         // Recorded before the shims stop; a listener may not receive them before the process exits,
         // so the log is saved after the shims stop and the next daemon serves them.
         ControlEventLog.shared.recordShutdown(resuming: Set(held.entries.map(\.key)))

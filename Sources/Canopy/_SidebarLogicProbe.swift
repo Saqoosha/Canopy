@@ -3062,6 +3062,26 @@ enum SidebarLogicProbe {
                 DaemonHeldSessions(entries: [], savedAt: heldNow).save(to: heldFile)
                 record("held restore: nothing held writes no file",
                        !FileManager.default.fileExists(atPath: heldFile.path))
+                // A move still waiting when the daemon restarts, any session, held or not.
+                let movingRemote = OpenSession(origin: .remote(host: "h", path: URL(fileURLWithPath: "/d")), resumeId: "REM", title: "R", project: "P")
+                let carried = SessionMove.CarriedMoves.capture([notHeld, heldA, movingRemote], now: heldNow) { session in
+                    session === heldA ? nil : "/to/\(session.title)"
+                }
+                record("carried moves: only a local session with a waiting move is kept, by lowercased resume id",
+                       carried.paths == ["free": "/to/F"])
+                let movesFile = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("canopy-probe-moves-\(UUID().uuidString).json")
+                carried.save(to: movesFile)
+                record("carried moves: consume returns what was saved and deletes the file",
+                       SessionMove.CarriedMoves.consume(from: movesFile, now: heldNow) == carried
+                           && !FileManager.default.fileExists(atPath: movesFile.path))
+                carried.save(to: movesFile)
+                record("carried moves: a file older than maxAge is dropped, and still deleted",
+                       SessionMove.CarriedMoves.consume(from: movesFile, now: heldNow + SessionMove.CarriedMoves.maxAge + 1) == nil
+                           && !FileManager.default.fileExists(atPath: movesFile.path))
+                SessionMove.CarriedMoves(paths: [:], savedAt: heldNow).save(to: movesFile)
+                record("carried moves: no waiting move writes no file",
+                       !FileManager.default.fileExists(atPath: movesFile.path))
                 let kept = ReapedSessions(defaults: nil)
                 kept.keepRows(of: [heldA, notHeld, noTranscript, byControl]) { $0.resumeId != "fresh" }
                 record("restart: every session with a transcript keeps a row, held ones too: a restore can fail",

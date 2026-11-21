@@ -764,7 +764,8 @@ final class ControlSession {
             if let refusal { return fail(request, refusal) }
             guard session.shim === shim, shim.isLive else { return fail(request, "The session restarted; ask again.") }
             guard shim.requestMove(to: path) else { return fail(request, "A move is already under way.") }
-            reply(request, ["status": "queued"])
+            // The move also waits for these, however long they run; the skill asks whether to stop them.
+            reply(request, ["status": "queued", "backgroundTasks": shim.backgroundTaskCount])
         }
     }
 

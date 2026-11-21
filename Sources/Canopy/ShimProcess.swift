@@ -4435,6 +4435,21 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return true
     }
 
+    /// The folder of a move not finished yet, for the daemon to carry across a restart.
+    var pendingMovePath: String? { pendingMove?.path }
+
+    /// Background commands and Monitors the CLI still runs; a move waits for every one to end.
+    var backgroundTaskCount: Int { pendingBackgroundTaskIds.count }
+
+    /// A move the previous daemon was still waiting on (`SessionMove.CarriedMoves`). Asked at the
+    /// CLI's `init`, since `set_cwd` needs a running CLI; it then waits for that turn to end.
+    private func askCarriedMoveAgain() {
+        guard remoteHost == nil, pendingMove == nil, let id = resumeSessionId?.lowercased(),
+              let path = SessionMove.CarriedMoves.waiting.removeValue(forKey: id) else { return }
+        logger.notice("[move] asking again for a move the restart interrupted")
+        _ = requestMove(to: path)
+    }
+
     /// `set_cwd` and the restart both wait for a moment with nothing to lose, as
     /// `moveToCheckoutWhenQuiet` does. While `restartLosesWork` holds, the next `result`
     /// or a cleared background task tries again.
@@ -8383,6 +8398,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // is one of the types the extension forwards verbatim as
             // io_message, see the Protocol notes in CLAUDE.md) plus the
             // captures on `mainModelUsage`.
+            if ioMsg["subtype"] as? String == "init" { askCarriedMoveAgain() }
             if ioMsg["subtype"] as? String == "init",
                let model = ioMsg["model"] as? String, !model.isEmpty
             {
