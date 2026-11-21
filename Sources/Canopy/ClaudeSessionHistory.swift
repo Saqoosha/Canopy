@@ -905,8 +905,10 @@ enum ClaudeSessionHistory {
     }
 
     /// The sidebar row's label before `SessionTitleStore` gets a say: the
-    /// session's `ai-title` if one was written, else its first user message,
-    /// else `"Untitled"`. Exposed for the sidebar logic probe.
+    /// first prompt the user typed, else the first user record's raw text,
+    /// else `"Untitled"`. The CLI's `ai-title`
+    /// records are not read; see `HeaderScanner.consume`. Exposed for the
+    /// sidebar logic probe.
     static func title(atPath path: String) -> String {
         extractMetadata(fromPath: path).title
     }
@@ -1124,7 +1126,7 @@ enum ClaudeSessionHistory {
 
     /// Bytes requested on the first read of every session, and the size of
     /// each escalation chunk after it — a smaller file reads less. Sized so
-    /// large base64 image attachments don't push `ai-title` past the window.
+    /// large base64 image attachments don't push the header records past it.
     /// Non-private for the same reason as `metadataMaxScanSize`.
     /// Also the SSH remote scan's window, interpolated into the script
     /// `RemoteSessionHistory.remoteScript` builds — which is the second reason
@@ -1481,7 +1483,6 @@ extension ClaudeSessionHistory {
     /// as the machine is used, so the two are not reconcilable and neither is
     /// restated as the other's.
     struct HeaderScanner {
-        private var aiTitle: String?
         private var firstUserMessage: String?
         private var firstCwd: String?
         /// The first timestamped record's `timestamp`: when the session started.
@@ -1561,11 +1562,8 @@ extension ClaudeSessionHistory {
                 stopScan = true
             }
 
-            if aiTitle == nil, type == "ai-title",
-               let value = json["aiTitle"] as? String, !value.isEmpty
-            {
-                aiTitle = value
-            }
+            // `ai-title` is not read: it is generated inside the session, so it
+            // carries the user's persona (20 of 38 in the week of 2026-11-16).
 
             guard type == "user" else { return }
             sawUserRecord = true
@@ -1611,7 +1609,7 @@ extension ClaudeSessionHistory {
         mutating func noteRelocated(_ cwd: String) { lastRelocatedCwd = cwd }
 
         var result: (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool, startedAt: Date?, firstPrompt: String?) {
-            (aiTitle ?? firstUserMessage ?? "Untitled",
+            (firstPrompt.map { String($0.prefix(100)) } ?? firstUserMessage ?? "Untitled",
              lastRelocatedCwd ?? firstCwd,
              isBackgroundScheduled,
              entrypoint?.hasPrefix("sdk-") == true,

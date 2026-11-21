@@ -4065,9 +4065,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
             // The extension still generates its own in-session title; Canopy
             // no longer consumes the result (see `applyTitleFromResponse`), so
-            // the request is forwarded unmodified apart from `persist`, which
-            // keeps the CLI from writing `ai-title` records into the session
-            // JSONL. Canopy used to rewrite the description too, to make that
+            // the request is forwarded unmodified apart from `persist: false`
+            // (the sidebar ignores `ai-title` records either way). Canopy used to rewrite the description too, to make that
             // title less persona-tainted — pointless once nothing reads it, and
             // the rewrite's own counter-instruction is the wording the
             // out-of-session route exists because it did not work.
