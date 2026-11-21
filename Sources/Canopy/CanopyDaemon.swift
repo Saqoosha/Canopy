@@ -257,6 +257,8 @@ final class DaemonDelegate {
         // Proxies handed out before a restart keep answering (PeerRelay); reopening one unlinks the live socket.
         PeerRelay.shared.restore()
         reloadConfig()
+        // Before restoreHeldSessions starts shims: each takes its move in `init`.
+        SessionMove.CarriedMoves.load(SessionMove.CarriedMoves.consume())
         restoreHeldSessions()
         // The GUI changes these settings in another process; follow them.
         configTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
@@ -542,6 +544,7 @@ final class DaemonDelegate {
 
     /// What this exit leaves for the next daemon; the result is what it will reopen by itself.
     func saveSessions(carrying: Bool, heldFile: URL = DaemonHeldSessions.fileURL,
+                      movesFile: URL = SessionMove.CarriedMoves.fileURL,
                       reaped: ReapedSessions = .shared) -> DaemonHeldSessions {
         let held = DaemonHeldSessions.capture(carrying ? store.openSessions : []) { session, dir in
             ShimProcess.jsonlPath(sessionId: session.resumeId, workingDirectory: dir) != nil
@@ -549,6 +552,10 @@ final class DaemonDelegate {
         held.save(to: heldFile)
         // `save` writes nothing for an empty list; a deliberate stop must not leave an older file to restore.
         if !carrying { try? FileManager.default.removeItem(at: heldFile) }
+        // Any session, held or not: a pane's session comes back when its client re-attaches.
+        try? FileManager.default.removeItem(at: movesFile)
+        SessionMove.CarriedMoves.capture(carrying ? store.openSessions : []) { $0.shim?.pendingMovePath }
+            .save(to: movesFile)
         reaped.keepRows(of: store.openSessions, hasTranscript: ReapedSessions.hasTranscript)
         return held
     }

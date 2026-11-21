@@ -19,4 +19,8 @@ description: Move this session, conversation included, to another folder on this
 
 4. **Tell the user and end the turn.** Say the session moves after this turn, once nothing else runs in it, and that a folder Claude Code has not trusted yet raises a confirmation only when it holds Claude Code config that came from outside. The confirmation shows on the screen of the Mac that runs the session and on any other Mac that has it open in Canopy, and any of them can answer. Nothing moves while the turn runs, so do not keep working and do not check whether it moved.
 
+   **If the reply's `backgroundTasks` is above 0**, the move also waits until every background command and Monitor of this session has ended, however long they run. Name them to the user and ask whether to stop them so the move can go now. Stop them with TaskStop only on a yes, then end the turn.
+
+   An update restart of Canopy before the move starts does not cancel it if the session is open again within ten minutes. Logging out or restarting the Mac does cancel it. Canopy then asks again when the session's Claude Code starts, and the move goes through by the end of its next turn.
+
 If `canopyctl` reports an error, say so in plain words. A session in a worktree or on an SSH remote cannot move. A second request replaces one that has not started, and is refused while one is under way.

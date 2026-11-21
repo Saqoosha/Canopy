@@ -3062,6 +3062,40 @@ enum SidebarLogicProbe {
                 DaemonHeldSessions(entries: [], savedAt: heldNow).save(to: heldFile)
                 record("held restore: nothing held writes no file",
                        !FileManager.default.fileExists(atPath: heldFile.path))
+                // A move still waiting when the daemon restarts, any session, held or not.
+                let movingRemote = OpenSession(origin: .remote(host: "h", path: URL(fileURLWithPath: "/d")), resumeId: "REM", title: "R", project: "P")
+                let carried = SessionMove.CarriedMoves.capture([notHeld, heldA, byControl, movingRemote], now: heldNow) { session in
+                    session === notHeld ? nil : "/to/\(session.title)"
+                }
+                record("carried moves: a local session with a waiting move is kept, held or not, by lowercased resume id",
+                       carried.paths == [SessionMove.CarriedMoves.key("held-A"): "/to/A", "ctl": "/to/C"]
+                           && SessionMove.CarriedMoves.key("held-A") == "held-a")
+                let movesFile = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("canopy-probe-moves-\(UUID().uuidString).json")
+                carried.save(to: movesFile)
+                record("carried moves: consume returns what was saved and deletes the file",
+                       SessionMove.CarriedMoves.consume(from: movesFile, now: heldNow) == carried
+                           && !FileManager.default.fileExists(atPath: movesFile.path))
+                carried.save(to: movesFile)
+                record("carried moves: a file older than maxAge is dropped, and still deleted",
+                       SessionMove.CarriedMoves.consume(from: movesFile, now: heldNow + SessionMove.CarriedMoves.maxAge + 1) == nil
+                           && !FileManager.default.fileExists(atPath: movesFile.path))
+                try? Data("not json".utf8).write(to: movesFile)
+                record("carried moves: an unreadable file is dropped, and still deleted",
+                       SessionMove.CarriedMoves.consume(from: movesFile, now: heldNow) == nil
+                           && !FileManager.default.fileExists(atPath: movesFile.path))
+                SessionMove.CarriedMoves(paths: [:], savedAt: heldNow).save(to: movesFile)
+                record("carried moves: no waiting move writes no file",
+                       !FileManager.default.fileExists(atPath: movesFile.path))
+                SessionMove.CarriedMoves.load(carried)
+                record("carried moves: a session starting again gets its move once, whatever the id's case",
+                       SessionMove.CarriedMoves.take(resumeId: "HELD-A", now: heldNow) == "/to/A"
+                           && SessionMove.CarriedMoves.take(resumeId: "held-A", now: heldNow) == nil
+                           && SessionMove.CarriedMoves.take(resumeId: nil, now: heldNow) == nil)
+                record("carried moves: a session that starts after maxAge does not move on the old request",
+                       SessionMove.CarriedMoves.take(resumeId: "ctl", now: heldNow + SessionMove.CarriedMoves.maxAge + 1) == nil
+                           && SessionMove.CarriedMoves.take(resumeId: "ctl", now: heldNow) == nil)
+                SessionMove.CarriedMoves.load(nil)
                 let kept = ReapedSessions(defaults: nil)
                 kept.keepRows(of: [heldA, notHeld, noTranscript, byControl]) { $0.resumeId != "fresh" }
                 record("restart: every session with a transcript keeps a row, held ones too: a restore can fail",
@@ -3082,8 +3116,11 @@ enum SidebarLogicProbe {
                 let saving = DaemonDelegate(store: savingStore)
                 let restartRows = ReapedSessions(defaults: nil)
                 let stopRows = ReapedSessions(defaults: nil)
-                _ = saving.saveSessions(carrying: true, heldFile: heldFile, reaped: restartRows)
-                _ = saving.saveSessions(carrying: false, heldFile: heldFile, reaped: stopRows)
+                _ = saving.saveSessions(carrying: true, heldFile: heldFile, movesFile: movesFile, reaped: restartRows)
+                try? Data("{}".utf8).write(to: movesFile)
+                _ = saving.saveSessions(carrying: false, heldFile: heldFile, movesFile: movesFile, reaped: stopRows)
+                record("restart: a deliberate stop leaves no waiting moves for the next daemon",
+                       !FileManager.default.fileExists(atPath: movesFile.path))
                 record("restart: the daemon saves the row on a restart and on a deliberate stop alike",
                        restartRows.rows.map(\.resumeId) == ["probe-save"] && stopRows.rows.map(\.resumeId) == ["probe-save"])
                 record("reaper: a quietSince in the future (clock change) is kept",
