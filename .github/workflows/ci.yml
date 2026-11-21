@@ -42,7 +42,7 @@ jobs:
     # is not a test at all goes in NON_TEST_FILES. Three visibly different
     # acts rather than one append that could mean any of them.
     env:
-      CI_TEST_FILES: "test/shim-unit.test.js test/shim-wiring.test.js test/cli-control.test.js test/cjk-emphasis.test.js test/cjk-emphasis-stream.test.js test/cjk-emphasis-wiring.test.js"
+      CI_TEST_FILES: "test/shim-unit.test.js test/shim-wiring.test.js test/cli-control.test.js test/cjk-emphasis.test.js test/cjk-emphasis-stream.test.js test/cjk-emphasis-wiring.test.js test/canopyctl-job.test.js"
       EXCLUDED_TEST_FILES: "test/shim-integration.test.js"
       # Not a test: a harness, imported only by the integration suite — so
       # nothing this job runs touches it. Node WOULD still discover it (see
@@ -463,7 +463,7 @@ jobs:
       - name: Run logic probe
         timeout-minutes: 5
         env:
-          EXPECTED_ASSERTIONS: 2633
+          EXPECTED_ASSERTIONS: 2723
         run: |
           set -o pipefail
           status=0

@@ -1045,7 +1045,7 @@ private struct SidebarRowView: View {
                 .controlSize(.small)
                 .scaleEffect(0.7)
         } else if case .open(let session) = row {
-            ActivityDot(activity: SessionActivity.of(session, isUnread: isUnread))
+            JobRingDot(activity: SessionActivity.of(session, isUnread: isUnread), job: session.job)
         } else if case .remoteLive(let remote) = row {
             ActivityDot(activity: remote.activity)
         } else {
@@ -1121,10 +1121,9 @@ private struct SidebarRowView: View {
     }
 
     private var attentionLine: String? {
-        guard case .open(let session) = row,
-              SidebarStatusGroup.showsAttentionLine(SessionActivity.of(session, isUnread: isUnread))
-        else { return nil }
-        return session.attentionLine
+        guard case .open(let session) = row else { return nil }
+        return JobDisplay.secondLine(SessionActivity.of(session, isUnread: isUnread), job: session.job,
+                                     attentionLine: session.attentionLine)
     }
 
     private var subtitleColor: Color { .secondary }
@@ -1144,7 +1143,23 @@ private struct SidebarRowView: View {
                 .padding(.vertical, 1)
                 .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.secondary.opacity(0.4)))
         }
-        if let activitySince {
+        if case .open(let s) = row, let job = s.job, JobDisplay.drawsRing(job) {
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                let t = JobDisplay.trailing(job, now: context.date)
+                VStack(alignment: .trailing, spacing: 0) {
+                    Text(t.top)
+                        .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(t.isAlert ? SessionActivity.error.dotColor : .primary)
+                    if let bottom = t.bottom {
+                        Text(bottom)
+                            .font(.system(size: 10).monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .help(JobDisplay.help(job, now: context.date))
+            }
+            .fixedSize()
+        } else if let activitySince {
             TimelineView(.periodic(from: .now, by: 30)) { context in
                 Text(ActivityClock.elapsed(since: activitySince, now: context.date))
                     .font(.system(size: 10).monospacedDigit())
@@ -1162,6 +1177,31 @@ private struct SidebarRowView: View {
     private var closeHelp: String {
         if case .launcher = row { return "Close pane" }
         return "Close session"
+    }
+}
+
+/// The activity dot inside a progress ring while the session has an unfinished job.
+/// Both take the row's color from `JobDisplay.ringActivity`, so the ring never
+/// introduces a color of its own.
+private struct JobRingDot: View {
+    let activity: SessionActivity
+    let job: JobSnapshot?
+
+    var body: some View {
+        if let job, JobDisplay.drawsRing(job) {
+            let shown = JobDisplay.ringActivity(activity, job: job)
+            ZStack {
+                Circle().stroke(shown.dotColor.opacity(0.18), lineWidth: 2)
+                Circle()
+                    .trim(from: 0, to: JobDisplay.fraction(job))
+                    .stroke(shown.dotColor, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                ActivityDot(activity: shown)
+            }
+            .frame(width: 16, height: 16)
+        } else {
+            ActivityDot(activity: activity)
+        }
     }
 }
 

@@ -16575,6 +16575,8 @@ enum SidebarLogicProbe {
             record("user settings file: setup failed", false, "\(error)")
         }
 
+        JobLogicProbe.run { record($0, $1, $2) }
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)

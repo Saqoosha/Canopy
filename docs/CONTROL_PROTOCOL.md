@@ -80,6 +80,7 @@ An open row, here and in `session_state`, may also carry:
 | `attentionLine` | One line naming the oldest pending permission request or question (the first question, Bash's description or command, a file tool's file name, or the tool name), else the first line of the last turn's final message; cut at 120 characters. Absent while there is none |
 | `backgroundTasks` | Running background Bash/Agent tasks. Absent while 0 |
 | `stateSince` | Unix seconds when the session entered its current status group: Needs you, Working, or Idle (which includes Done · unseen) |
+| `job` | The registered long job (`job_watch`): `label`, `done`, `total`, `state` (`measuring`, `running`, `stalled`, `unknown`, `done`), and while known `etaAt` (unix seconds), `stalledSince` (unix seconds) and `note` (why a reading is missing). Absent while no job is registered |
 
 `scope: "recent"` lists past sessions, most recently active first. These are
 the rows `open_session`'s `resumeSessionId` continues. Without filters it
@@ -215,6 +216,23 @@ It takes no trust argument. For a folder the CLI does not trust yet, the daemon 
 alert itself, and only Move pressed there lets the move go on, so this socket cannot approve a
 folder. The CLI's own trust file is outside Canopy's reach. A failure after `queued` raises a
 system notice on this Mac.
+
+### `job_watch`, `job_list`, `job_clear`
+
+A long job's progress, shown as a ring and a finish time on the session's sidebar row and on the
+phone (`docs/superpowers/specs/2026-11-21-job-eta-gauge-design.md`). One job per session.
+
+- `job_watch` (local clients only: it runs a shell command on a timer). Params: `key` or
+  `sessionId`, `label`, `probe` (a shell command printing `N/M`, or a count when `total` is given),
+  and optional `host` (run the probe over ssh there), `total`, `interval` (seconds, default 150,
+  at least 30) and `stallMinutes`. Replaces the session's job. Reply: `{"job": {...}}`, the
+  session row's `job` object.
+- `job_list`. Params: `key` or `sessionId`. Reply: `{"job": {...}}` or `{"job": null}`.
+- `job_clear` (local clients only). Params: `key` or `sessionId`. Reply: `{"cleared": true|false}`.
+
+canopyd runs the probe at once and then every `interval`, saves registrations in
+`~/Library/Application Support/Canopy/jobs-<bundle id>.json`, and drops a job whose session has not
+been open for 15 minutes. Over ssh it uses `SSH_AUTH_SOCK` from `~/.claude/settings.json`'s `env`.
 
 ### `send_message`
 

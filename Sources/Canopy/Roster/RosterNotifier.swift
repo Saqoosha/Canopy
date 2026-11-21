@@ -10,7 +10,11 @@ private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "Roster")
 /// change, so nothing here is worth a retry queue.
 @MainActor
 enum RosterNotifier {
-    enum Kind: String { case completed, asking }
+    enum Kind: String {
+        case completed, asking
+        /// A registered job stopped moving or finished (`JobWatcher`). The relay must know these names.
+        case jobStalled = "job_stalled", jobDone = "job_done"
+    }
 
     /// False in a GUI whose local sessions run in the daemon. The shims it
     /// still runs (SSH remote) are not on the daemon's roster, so the phone's

@@ -229,6 +229,7 @@ final class DaemonDelegate {
 
         // From launch, so `listen` sees sessions opened before any client connects.
         ControlEventLog.shared.track(store)
+        JobWatcher.shared.start(store: store)
         let server = MirrorServer(store: store, token: MirrorAccess.token(createIfMissing: false) ?? "")
         server.acceptsControl = true
         server.refreshesToken = true

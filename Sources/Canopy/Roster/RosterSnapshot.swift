@@ -4,9 +4,12 @@ import Foundation
 /// Durable Object replaces rather than merges, so a dropped update can never
 /// leave the phone showing a pane that has since closed.
 ///
-/// **Carries no conversation content**, and that is a contract, not an
-/// oversight: see the spec's roster section. Adding a field that quotes the
-/// transcript reopens a decision that was made deliberately.
+/// Carries one line of conversation content: `attentionLine`, what a session
+/// last asked for or said, so the phone matches the sidebar. Until 2026-11-21
+/// the roster carried none (the 2026-09-03 spec's roster section); Saqoosha
+/// reversed that for the job ETA gauge (2026-11-21 spec). The event stream
+/// already carried assistant text to the phone, so little new leaves the Mac.
+/// Anything beyond that one line still needs its own decision.
 struct RosterSnapshot: Codable, Equatable {
     struct Pane: Codable, Equatable, Hashable {
         let sessionId: String
@@ -30,15 +33,20 @@ struct RosterSnapshot: Codable, Equatable {
         /// Absent from a Canopy older than the flag; decoded as true, which is
         /// what the attach server's test would have said for a session with a pane.
         let live: Bool
+        /// `OpenSession.attentionLine`; absent while nil.
+        let attentionLine: String?
+        /// `OpenSession.job`; absent while nil.
+        let job: JobSnapshot?
 
         private enum CodingKeys: String, CodingKey {
             case sessionId, resumeId, paneIndex, title, project, state, stateSince
-            case contextPct, model, messageCount, live
+            case contextPct, model, messageCount, live, attentionLine, job
         }
 
         init(sessionId: String, resumeId: String?, paneIndex: Int, title: String,
              project: String, state: String, stateSince: Int, contextPct: Int,
-             model: String, messageCount: Int, live: Bool) {
+             model: String, messageCount: Int, live: Bool,
+             attentionLine: String? = nil, job: JobSnapshot? = nil) {
             self.sessionId = sessionId
             self.resumeId = resumeId
             self.paneIndex = paneIndex
@@ -50,6 +58,8 @@ struct RosterSnapshot: Codable, Equatable {
             self.model = model
             self.messageCount = messageCount
             self.live = live
+            self.attentionLine = attentionLine
+            self.job = job
         }
 
         init(from decoder: Decoder) throws {
@@ -65,6 +75,8 @@ struct RosterSnapshot: Codable, Equatable {
             model = try c.decode(String.self, forKey: .model)
             messageCount = try c.decode(Int.self, forKey: .messageCount)
             live = try c.decodeIfPresent(Bool.self, forKey: .live) ?? true
+            attentionLine = try c.decodeIfPresent(String.self, forKey: .attentionLine)
+            job = try c.decodeIfPresent(JobSnapshot.self, forKey: .job)
         }
     }
 

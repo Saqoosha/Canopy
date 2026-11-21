@@ -345,6 +345,8 @@ enum ControlProtocol {
         let backgroundTasks: Int
         /// Unix seconds the daemon's `ActivityClock` stamped; absent before it has one.
         let stateSince: Double?
+        /// `OpenSession.job`, the registered job's progress; absent on the wire while nil.
+        let job: JobSnapshot?
 
         var wire: [String: Any] {
             var dict: [String: Any] = [
@@ -358,13 +360,14 @@ enum ControlProtocol {
             if let attentionLine { dict["attentionLine"] = attentionLine }
             if backgroundTasks > 0 { dict["backgroundTasks"] = backgroundTasks }
             if let stateSince { dict["stateSince"] = stateSince }
+            if let job { dict["job"] = job.wire }
             return dict
         }
 
         init(key: String?, resumeId: String, title: String, project: String, cwd: String, state: String,
              running: Bool, clients: Int, lastActiveAt: Double, model: String, messageCount: Int,
              permissionMode: String, accountId: String?, moveCount: Int = 0, attentionLine: String? = nil,
-             backgroundTasks: Int = 0, stateSince: Double? = nil) {
+             backgroundTasks: Int = 0, stateSince: Double? = nil, job: JobSnapshot? = nil) {
             self.key = key
             self.resumeId = resumeId
             self.title = title
@@ -382,6 +385,7 @@ enum ControlProtocol {
             self.attentionLine = attentionLine
             self.backgroundTasks = backgroundTasks
             self.stateSince = stateSince
+            self.job = job
         }
 
         init?(wire: [String: Any]) {
@@ -396,7 +400,8 @@ enum ControlProtocol {
                       accountId: wire["accountId"] as? String, moveCount: wire["moveCount"] as? Int ?? 0,
                       attentionLine: wire["attentionLine"] as? String,
                       backgroundTasks: wire["backgroundTasks"] as? Int ?? 0,
-                      stateSince: (wire["stateSince"] as? NSNumber)?.doubleValue)
+                      stateSince: (wire["stateSince"] as? NSNumber)?.doubleValue,
+                      job: (wire["job"] as? [String: Any]).flatMap(JobSnapshot.init(wire:)))
         }
     }
 

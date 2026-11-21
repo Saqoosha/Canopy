@@ -586,7 +586,9 @@ final class RosterPublisher {
                 model: session.statusBar.model,
                 // Retired: always 0; Canopy Mobile and older Macs still decode the key.
                 messageCount: 0,
-                live: RosterSnapshot.isLive(session)))
+                live: RosterSnapshot.isLive(session),
+                attentionLine: session.attentionLine,
+                job: session.job))
         }
         // `OpenSession.ID` is a fresh UUID minted per process and never
         // reused, so without this both dictionaries grow for the life of a

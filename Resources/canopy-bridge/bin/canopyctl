@@ -97,6 +97,30 @@ def main(argv):
     show_p.add_argument("session_id", metavar="SESSION_ID")
     show_p.add_argument("--machine", help="the Mac it is on; default: this Mac")
 
+    job_p = sub.add_parser(
+        "job",
+        help="job_watch / job_list / job_clear: show a long job's finish time in Canopy",
+    )
+    job_sub = job_p.add_subparsers(dest="job_cmd", required=True)
+    watch_p = job_sub.add_parser(
+        "watch", help="register this session's job; Canopy runs --probe every --interval seconds"
+    )
+    watch_p.add_argument("--session-id", required=True)
+    watch_p.add_argument("--label", required=True, help="short name shown on hover")
+    watch_p.add_argument(
+        "--probe", required=True, help="shell command that prints N/M (or a count, with --total)"
+    )
+    watch_p.add_argument("--host", help="run the probe over ssh on this host")
+    watch_p.add_argument("--total", type=int, help="the probe prints only a count; this is N")
+    watch_p.add_argument("--interval", type=float, default=150.0, help="seconds between runs (min 30)")
+    watch_p.add_argument(
+        "--stall-minutes", dest="stall_minutes", type=float,
+        help="minutes without progress before the job counts as stalled",
+    )
+    for name in ("list", "clear"):
+        jp = job_sub.add_parser(name, help=f"job_{name}")
+        jp.add_argument("--session-id", required=True)
+
     move_p = sub.add_parser(
         "move", help="move_session: move a session to another folder once nothing runs in it"
     )
@@ -374,6 +398,20 @@ def build(args):
         if args.machine and args.machine != "local":
             params["machineId"] = args.machine
         return "show_session", params
+    if args.cmd == "job":
+        params = {"sessionId": args.session_id}
+        if args.job_cmd != "watch":
+            return f"job_{args.job_cmd}", params
+        params.update(label=args.label, probe=args.probe)
+        if args.host:
+            params["host"] = args.host
+        if args.total is not None:
+            params["total"] = args.total
+        params["interval"] = int(args.interval) if args.interval.is_integer() else args.interval
+        if args.stall_minutes is not None:
+            sm = args.stall_minutes
+            params["stallMinutes"] = int(sm) if sm.is_integer() else sm
+        return "job_watch", params
     if args.cmd == "move":
         return "move_session", {"sessionId": args.session_id, "path": args.path}
     if args.cmd == "peers":

@@ -27,6 +27,15 @@ function namesPath(command, path) {
   })
 }
 
+// A Bash call that starts something long: detached or backgrounded. `run_in_background` counts too.
+// A job-watch registration shows its finish time in Canopy (skills/job-watch).
+export const LONG_JOB = /\bnohup\b|\bsetsid\b|\btmux\s+new(?:-session)?\b[^|;]*\s-d\b|\bscreen\s+-d?m\w*\b|\bssh\b[^|;]*&\s*$/m
+export const JOB_NUDGE = 'This looks like a long-running job. If it reports progress as N/M (or a count with a known total), '
+  + 'register it with the job-watch skill so Canopy shows its finish time.'
+const JOB_NUDGE_EVERY_MS = 30 * 60_000
+const REGISTERS_JOB = /\bcanopyctl\b[^|;]*\bjob\s+watch\b/
+const CLEARS_JOB = /\bcanopyctl\b[^|;]*\bjob\s+clear\b/
+
 // Commands that delete a worktree folder: git's own removal, or deleting it outright.
 const REMOVES = /\bworktree\s+remove\b|\brm\s+(?:-\w+\s+)*-\w*[rR]/
 
@@ -819,5 +828,31 @@ export function register(on) {
         reentering = undefined
       }
     }
+  })
+
+  // One note after a long job starts, so the model registers it (skills/job-watch). Not after a
+  // registration in this session, and at most once in 30 minutes.
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    const r = await next(e)
+    const command = e.command ?? ''
+    if (r?.deny || r?.isError) return r
+    const sid = await $.session.id()
+    // The later of a clear and a watch in one command wins.
+    const cleared = command.search(CLEARS_JOB), watched = command.search(REGISTERS_JOB)
+    if (cleared >= 0 && cleared > watched) {
+      await $.store.delete(`job-registered:${sid}`).catch(() => {})
+      return r
+    }
+    if (watched >= 0) {
+      await $.store.set(`job-registered:${sid}`, true).catch(() => {})
+      return r
+    }
+    if (!e.run_in_background && !LONG_JOB.test(command)) return r
+    if (await $.store.get(`job-registered:${sid}`).catch(() => false)) return r
+    const now = await $.clock.now()
+    const last = await $.store.get(`job-nudge:${sid}`).catch(() => undefined)
+    if (typeof last === 'number' && now - last < JOB_NUDGE_EVERY_MS) return r
+    await $.store.set(`job-nudge:${sid}`, now).catch(() => {})
+    return { ...r, context: [...(r.context ?? []), JOB_NUDGE] }
   })
 }

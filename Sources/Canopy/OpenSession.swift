@@ -190,6 +190,10 @@ final class OpenSession: Identifiable, Hashable {
     /// `bg: N` badge. Written by the shim alongside `isWaiting`.
     var backgroundTaskCount: Int = 0
 
+    /// The registered long job's progress (`canopyctl job watch`). Written by
+    /// the daemon's `JobWatcher`; the GUI copies it from `session_state`.
+    var job: JobSnapshot?
+
     /// When the daemon saw this session enter its current status group; seeds
     /// the GUI's `ActivityClock` for a session it has not stamped yet.
     var daemonActivitySince: Date?
