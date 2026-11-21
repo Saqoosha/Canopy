@@ -232,7 +232,7 @@ phone (`docs/superpowers/specs/2026-11-21-job-eta-gauge-design.md`). One job per
 
 canopyd runs the probe at once and then every `interval`, saves registrations in
 `~/Library/Application Support/Canopy/jobs-<bundle id>.json`, and drops a job whose session has not
-been open for 15 minutes. A session whose job is measuring, running, or stalled for under 6 hours is not reaped when idle and is carried across a daemon restart, so closing its pane does not drop the job; an `unknown` or `done` job holds nothing. Over ssh it uses `SSH_AUTH_SOCK` from `~/.claude/settings.json`'s `env`.
+been open for 15 minutes. A session whose job is measuring, running, stalled for under 6 hours, or `unknown` within 6 hours of its last count is not reaped when idle and is carried across a daemon restart, so closing its pane does not drop the job; a `done` job holds nothing. Over ssh it uses `SSH_AUTH_SOCK` from `~/.claude/settings.json`'s `env`.
 
 ### `send_message`
 

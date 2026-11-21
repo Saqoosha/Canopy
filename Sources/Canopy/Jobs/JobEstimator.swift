@@ -30,6 +30,9 @@ struct JobSnapshot: Hashable {
     let stalledSince: Date?
     /// Why a reading is missing, shown on hover (e.g. "ssh の認証に失敗"). Set by `JobWatcher`.
     var note: String? = nil
+    /// When the probe last returned a count. Set by `JobTrack`; an `unknown` job holds its
+    /// session for a while after it (`JobWatcher.holdsSession`).
+    var lastReadingAt: Date? = nil
 }
 
 /// Turns probe output into a count, and a run of counts into a finish time.

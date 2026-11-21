@@ -514,6 +514,9 @@ final class DaemonDelegate {
             }
             shim.boundSession?.heldOpenByPhone = entry.holders.phone
             shim.boundSession?.openedByControl = entry.holders.control
+            // A session carried for its job is held by that job alone: give it the job now, not
+            // at the job's next reading, which can come after the reaper's idle limit.
+            if shim.boundSession?.job == nil { shim.boundSession?.job = JobWatcher.shared.snapshot(resumeId: entry.resumeId) }
         }
         logger.notice("restored \(held.entries.count, privacy: .public) held session(s)")
     }

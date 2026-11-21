@@ -5,7 +5,7 @@ import Foundation
 /// seconds on both, so the phone can format them with its own clock.
 extension JobSnapshot: Codable {
     private enum CodingKeys: String, CodingKey {
-        case label, done, total, etaAt, state, stalledSince, note
+        case label, done, total, etaAt, state, stalledSince, note, lastReadingAt
     }
 
     init(from decoder: Decoder) throws {
@@ -17,6 +17,7 @@ extension JobSnapshot: Codable {
         state = try c.decode(JobState.self, forKey: .state)
         stalledSince = try c.decodeIfPresent(Int.self, forKey: .stalledSince).map { Date(timeIntervalSince1970: TimeInterval($0)) }
         note = try c.decodeIfPresent(String.self, forKey: .note)
+        lastReadingAt = try c.decodeIfPresent(Int.self, forKey: .lastReadingAt).map { Date(timeIntervalSince1970: TimeInterval($0)) }
     }
 
     func encode(to encoder: Encoder) throws {
@@ -28,6 +29,7 @@ extension JobSnapshot: Codable {
         try c.encode(state, forKey: .state)
         try c.encodeIfPresent(stalledSince.map { Int($0.timeIntervalSince1970) }, forKey: .stalledSince)
         try c.encodeIfPresent(note, forKey: .note)
+        try c.encodeIfPresent(lastReadingAt.map { Int($0.timeIntervalSince1970) }, forKey: .lastReadingAt)
     }
 
     var wire: [String: Any] {
@@ -35,6 +37,7 @@ extension JobSnapshot: Codable {
         if let etaAt { dict["etaAt"] = Int(etaAt.timeIntervalSince1970) }
         if let stalledSince { dict["stalledSince"] = Int(stalledSince.timeIntervalSince1970) }
         if let note { dict["note"] = note }
+        if let lastReadingAt { dict["lastReadingAt"] = Int(lastReadingAt.timeIntervalSince1970) }
         return dict
     }
 
@@ -44,6 +47,7 @@ extension JobSnapshot: Codable {
               let state = (wire["state"] as? String).flatMap(JobState.init(rawValue:)) else { return nil }
         let time = { (key: String) in (wire[key] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) } }
         self.init(label: label, done: done, total: total, etaAt: time("etaAt"), state: state,
-                  stalledSince: time("stalledSince"), note: wire["note"] as? String)
+                  stalledSince: time("stalledSince"), note: wire["note"] as? String,
+                  lastReadingAt: time("lastReadingAt"))
     }
 }

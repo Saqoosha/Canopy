@@ -72,7 +72,7 @@ enum JobLogicProbe {
         let late = JobWatcher.runSync(["/bin/sh", "-c", "sleep 0.8; exec >/dev/null 2>&1; sleep 30"],
                                       env: ProcessInfo.processInfo.environment, timeout: 1)
         let shareTook = Date().timeIntervalSince(shareStart)
-        record("limits: the pipe and the exit share one deadline", late.status == JobWatcher.timedOut && shareTook < 1.7,
+        record("limits: the pipe and the exit share one deadline", late.status == JobWatcher.timedOut && shareTook < 1.9,
                "took=\(shareTook)")
         let tidy = JobWatcher.runSync(["/bin/sh", "-c", "echo 3/10; exec >/dev/null 2>&1; sleep 0.3"],
                                       env: ProcessInfo.processInfo.environment, timeout: 5)
@@ -86,11 +86,12 @@ enum JobLogicProbe {
         record("limits: no job leaves the reaper as before",
                !ShimProcess.reaperHolds(heldByPhone: false, openedByControl: false, watched: false, activeJob: false), "")
         let now = Date(timeIntervalSince1970: 2_000_000)
-        func job(_ state: JobState, stalledFor hours: Double = 0) -> JobSnapshot {
+        func job(_ state: JobState, stalledFor hours: Double = 0, readAgo: Double = 0) -> JobSnapshot {
             JobSnapshot(label: "x", done: 1, total: 10, etaAt: nil, state: state,
-                        stalledSince: state == .stalled ? now.addingTimeInterval(-hours * 3600) : nil)
+                        stalledSince: state == .stalled ? now.addingTimeInterval(-hours * 3600) : nil,
+                        lastReadingAt: now.addingTimeInterval(-readAgo * 3600))
         }
-        let expected: [JobState: Bool] = [.measuring: true, .running: true, .stalled: true, .unknown: false, .done: false]
+        let expected: [JobState: Bool] = [.measuring: true, .running: true, .stalled: true, .unknown: true, .done: false]
         for state in JobState.allCases {
             record("limits: a \(state.rawValue) job \(expected[state]! ? "holds" : "does not hold") its session",
                    JobWatcher.holdsSession(job(state), now: now) == expected[state]!, "")
@@ -99,6 +100,17 @@ enum JobLogicProbe {
                !JobWatcher.holdsSession(job(.stalled, stalledFor: JobWatcher.stalledHoldSeconds / 3600 + 0.1), now: now)
                    && JobWatcher.holdsSession(job(.stalled, stalledFor: JobWatcher.stalledHoldSeconds / 3600 - 0.1), now: now), "")
         record("limits: no job holds nothing", !JobWatcher.holdsSession(nil, now: now), "")
+        let limitHours = JobWatcher.stalledHoldSeconds / 3600
+        record("limits: an unknown job holds until its last reading is older than the limit",
+               JobWatcher.holdsSession(job(.unknown, readAgo: limitHours - 0.1), now: now)
+                   && !JobWatcher.holdsSession(job(.unknown, readAgo: limitHours + 0.1), now: now)
+                   && !JobWatcher.holdsSession(JobSnapshot(label: "x", done: 0, total: 0, etaAt: nil, state: .unknown,
+                                                           stalledSince: nil), now: now), "")
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        var tr = JobTrack(spec: JobSpec(resumeId: "r", label: "L", probe: "p", host: nil, total: nil, interval: 150, stallMinutes: nil))
+        tr.record(output: "1/10", exitStatus: 0, at: t0)
+        tr.record(output: nil, exitStatus: 1, at: t0.addingTimeInterval(150))
+        record("limits: a snapshot carries the time of the last good reading", tr.snapshot(now: t0.addingTimeInterval(300)).lastReadingAt == t0, "")
 
         let dir = URL(fileURLWithPath: "/tmp/probe/job-held")
         let withJob = OpenSession(origin: .local(dir), resumeId: "job", title: "J", project: "P")

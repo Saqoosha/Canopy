@@ -49,4 +49,4 @@ A finished job clears its ring by itself; clear it when you abandon a job, or th
 - Not available in an SSH-remote session (Canopy's session over ssh): there is no control socket there.
 - A local probe runs under canopyd's `PATH` plus `/opt/homebrew/bin` and `/usr/local/bin`, not your login shell's: name any other tool by its full path. Over ssh it runs in a non-interactive remote shell, which may not load your profile: use full paths there too. It uses the same SSH agent as this session.
 - After three failed readings the job shows `—` and Canopy retries only every 15 minutes.
-- While the job is measuring, running, or stalled for under 6 hours, Canopy keeps this session alive even if its pane is closed; a job whose probe keeps failing does not.
+- While the job is measuring, running, or stalled for under 6 hours, or its probe has failed for under 6 hours since the last count, Canopy keeps this session alive even if its pane is closed.

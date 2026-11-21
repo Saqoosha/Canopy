@@ -70,6 +70,7 @@ struct JobTrack: Codable, Equatable {
         var snap = JobEstimator.evaluate(label: spec.label, samples: samples, failures: failures,
                                          now: now, stallMinutes: spec.stallMinutes, previous: lastState)
         snap.note = note
+        snap.lastReadingAt = samples.last?.at
         return snap
     }
 
@@ -255,18 +256,20 @@ final class JobWatcher {
         }
     }
 
-    /// A stall holds its session this long; past it the job is taken as dead.
+    /// A stall, or a probe that keeps failing, holds its session this long; past it the job is
+    /// taken as dead.
     nonisolated static let stalledHoldSeconds: TimeInterval = 6 * 3600
 
     /// Whether a session's job keeps the daemon from reaping it: one that is measuring or
-    /// running, or stalled for under `stalledHoldSeconds`. Never `unknown` (its probe keeps
-    /// failing, so nothing says the job is alive) or `done`.
+    /// running, stalled for under `stalledHoldSeconds`, or `unknown` with a good reading in that
+    /// time (a short outage, such as an unseen 1Password prompt, must not drop the job). Never `done`.
     nonisolated static func holdsSession(_ job: JobSnapshot?, now: Date = Date()) -> Bool {
         guard let job else { return false }
         switch job.state {
         case .measuring, .running: return true
         case .stalled: return job.stalledSince.map { now.timeIntervalSince($0) < stalledHoldSeconds } ?? true
-        case .unknown, .done: return false
+        case .unknown: return job.lastReadingAt.map { now.timeIntervalSince($0) < stalledHoldSeconds } ?? false
+        case .done: return false
         }
     }
 
@@ -349,7 +352,9 @@ final class JobWatcher {
             // A process stuck in the kernel (a hung network mount) outlives SIGKILL: give up on it.
             if exited.wait(timeout: .now() + 5) == .timedOut {
                 logger.error("probe pid \(pid) did not exit after SIGKILL")
-                return (buffer.withLock { String(decoding: $0.data.suffix(64 * 1024), as: UTF8.self) }, timedOut)
+                try? reader.close()
+                return (buffer.withLock { String(decoding: $0.data.suffix(64 * 1024), as: UTF8.self) },
+                        overflow ? tooMuchOutput : timedOut)
             }
         }
         process.waitUntilExit()
