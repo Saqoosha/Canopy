@@ -56,6 +56,7 @@ final class RemoteRosterWatcher {
         loggedMissingSecret = false
         store.remoteMachineIds = []
         store.remoteRosters = [:]
+        store.expireMirrorState()
     }
 
     // MARK: Pure
@@ -124,7 +125,10 @@ final class RemoteRosterWatcher {
         timer.resume()
         clockTimer?.cancel()
         let clock = Self.makeListTimer(interval: Self.clockInterval) { [weak self] in
-            Task { @MainActor in self?.store.remoteClock = Date() }
+            Task { @MainActor in
+                self?.store.remoteClock = Date()
+                self?.store.expireMirrorState()
+            }
         }
         clockTimer = clock
         clock.resume()

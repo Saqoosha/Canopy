@@ -263,6 +263,10 @@ final class PeerNameStore {
             changed = true
         }
         guard changed else { return }
+        // The GUI and the daemon both save; merge what the other wrote so neither drops its names.
+        for (key, stored) in Self.loadSavedNames() where (savedNames[key]?.savedAt ?? .distantPast) < stored.savedAt {
+            savedNames[key] = stored
+        }
 
         if savedNames.count > Self.maxStoredNames {
             let doomed = savedNames

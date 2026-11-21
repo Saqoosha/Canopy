@@ -194,6 +194,10 @@ final class OpenSession: Identifiable, Hashable {
     /// the daemon's `JobWatcher`; the GUI copies it from `session_state`.
     var job: JobSnapshot?
 
+    /// A mirror's peer name as its home Mac's roster reports it. The local
+    /// `PeerNameStore` cannot see it: the CLI runs on the other Mac.
+    var mirrorPeerName: String?
+
     /// When the daemon saw this session enter its current status group; seeds
     /// the GUI's `ActivityClock` for a session it has not stamped yet.
     var daemonActivitySince: Date?

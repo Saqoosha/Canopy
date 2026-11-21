@@ -37,16 +37,19 @@ struct RosterSnapshot: Codable, Equatable {
         let attentionLine: String?
         /// `OpenSession.job`; absent while nil.
         let job: JobSnapshot?
+        /// The CLI's peer name (`PeerNameStore`), so another Mac's mirror pane
+        /// can show it; absent while the session has none.
+        let peerName: String?
 
         private enum CodingKeys: String, CodingKey {
             case sessionId, resumeId, paneIndex, title, project, state, stateSince
-            case contextPct, model, messageCount, live, attentionLine, job
+            case contextPct, model, messageCount, live, attentionLine, job, peerName
         }
 
         init(sessionId: String, resumeId: String?, paneIndex: Int, title: String,
              project: String, state: String, stateSince: Int, contextPct: Int,
              model: String, messageCount: Int, live: Bool,
-             attentionLine: String? = nil, job: JobSnapshot? = nil) {
+             attentionLine: String? = nil, job: JobSnapshot? = nil, peerName: String? = nil) {
             self.sessionId = sessionId
             self.resumeId = resumeId
             self.paneIndex = paneIndex
@@ -60,6 +63,7 @@ struct RosterSnapshot: Codable, Equatable {
             self.live = live
             self.attentionLine = attentionLine
             self.job = job
+            self.peerName = peerName
         }
 
         init(from decoder: Decoder) throws {
@@ -77,6 +81,7 @@ struct RosterSnapshot: Codable, Equatable {
             live = try c.decodeIfPresent(Bool.self, forKey: .live) ?? true
             attentionLine = try c.decodeIfPresent(String.self, forKey: .attentionLine)
             job = try c.decodeIfPresent(JobSnapshot.self, forKey: .job)
+            peerName = try c.decodeIfPresent(String.self, forKey: .peerName)
         }
     }
 
