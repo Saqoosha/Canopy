@@ -54,6 +54,29 @@ enum JobLogicProbe {
         let ok = JobWatcher.runSync(["/bin/sh", "-c", "echo 3/10"], env: ProcessInfo.processInfo.environment, timeout: 5)
         record("review: a quick probe returns its output", ok.status == 0 && ok.output?.contains("3/10") == true, "\(ok)")
         shipItFixes(record)
+        limits(record)
+    }
+
+    /// Canopy#434's two leftovers: the unbounded wait after the pipe closes, and a reaped session
+    /// taking its running job with it.
+    @MainActor
+    private static func limits(_ record: (String, Bool, String) -> Void) {
+        let started = Date()
+        let closed = JobWatcher.runSync(["/bin/sh", "-c", "echo 1/10; exec >/dev/null 2>&1; sleep 30"],
+                                        env: ProcessInfo.processInfo.environment, timeout: 1)
+        let took = Date().timeIntervalSince(started)
+        record("limits: a probe that closes stdout and keeps running is cut off at the timeout",
+               closed.status == JobWatcher.timedOut && took < 5, "status=\(closed.status) took=\(took)")
+
+        record("limits: an unfinished job keeps an idle session from being reaped",
+               ShimProcess.reaperHolds(heldByPhone: false, openedByControl: false, watched: false, activeJob: true), "")
+        record("limits: no job leaves the reaper as before",
+               !ShimProcess.reaperHolds(heldByPhone: false, openedByControl: false, watched: false, activeJob: false), "")
+        let running = JobSnapshot(label: "x", done: 1, total: 10, etaAt: nil, state: .running, stalledSince: nil)
+        let finished = JobSnapshot(label: "x", done: 10, total: 10, etaAt: nil, state: .done, stalledSince: nil)
+        record("limits: a finished job no longer holds the session",
+               JobWatcher.holdsSession(running) && JobWatcher.holdsSession(JobSnapshot(label: "x", done: 0, total: 0, etaAt: nil, state: .measuring, stalledSince: nil))
+                   && !JobWatcher.holdsSession(finished) && !JobWatcher.holdsSession(nil), "")
     }
 
     /// Findings from /ship-it on #434 and Canopy-Mobile#108.

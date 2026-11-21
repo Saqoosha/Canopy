@@ -232,7 +232,7 @@ phone (`docs/superpowers/specs/2026-11-21-job-eta-gauge-design.md`). One job per
 
 canopyd runs the probe at once and then every `interval`, saves registrations in
 `~/Library/Application Support/Canopy/jobs-<bundle id>.json`, and drops a job whose session has not
-been open for 15 minutes. Over ssh it uses `SSH_AUTH_SOCK` from `~/.claude/settings.json`'s `env`.
+been open for 15 minutes. A session with an unfinished job (any state but `done`) is not reaped when idle, so closing its pane does not drop the job. Over ssh it uses `SSH_AUTH_SOCK` from `~/.claude/settings.json`'s `env`.
 
 ### `send_message`
 
