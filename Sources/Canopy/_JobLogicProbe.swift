@@ -8,6 +8,30 @@ enum JobLogicProbe {
         estimator(record)
         wire(record)
         watcher(record)
+        pushes(record)
+    }
+
+    @MainActor
+    private static func pushes(_ record: (String, Bool, String) -> Void) {
+        func job(_ state: JobState) -> JobSnapshot {
+            JobSnapshot(label: "h7", done: 680, total: 1077, etaAt: nil, state: state, stalledSince: nil)
+        }
+        let stalled = JobWatcher.pushText(job(.stalled))
+        record("job push: stalled text", stalled?.title == "h7" && stalled?.body == "680/1077 で止まっている", "\(String(describing: stalled))")
+        let done = JobWatcher.pushText(job(.done))
+        record("job push: done text", done?.title == "h7" && done?.body == "完了", "\(String(describing: done))")
+        record("job push: other states send nothing",
+               [JobState.running, .measuring, .unknown].allSatisfy { JobWatcher.pushText(job($0)) == nil }, "")
+        var previous: JobState? = nil
+        var posts = 0
+        for state in [JobState.measuring, .running, .stalled, .stalled, .running, .stalled, .done, .done] {
+            if JobWatcher.shouldPush(from: previous, to: state) { posts += 1 }
+            previous = state
+        }
+        record("job push: one push per transition into stalled or done", posts == 3, "posts=\(posts)")
+        record("job push: the first reading never pushes", !JobWatcher.shouldPush(from: nil, to: .done), "")
+        record("job push: kinds match the relay's names",
+               RosterNotifier.Kind.jobStalled.rawValue == "job_stalled" && RosterNotifier.Kind.jobDone.rawValue == "job_done", "")
     }
 
     @MainActor

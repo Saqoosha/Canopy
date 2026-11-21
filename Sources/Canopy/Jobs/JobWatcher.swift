@@ -62,9 +62,6 @@ final class JobWatcher {
     /// enough that a daemon restart, which reopens sessions after this restores, keeps it.
     static let orphanSeconds: TimeInterval = 15 * 60
 
-    /// Called when a job's state changes (not on its first reading). Task 4 posts pushes from it.
-    var onTransition: ((OpenSession, JobState, JobSnapshot) -> Void)?
-
     private weak var store: SessionStore?
     private var tracks: [String: JobTrack] = [:]
     private var timers: [String: Timer] = [:]
@@ -184,7 +181,29 @@ final class JobWatcher {
         if session.job != snap { session.job = snap }
         let previous = lastState[id]
         lastState[id] = snap.state
-        if let previous, previous != snap.state { onTransition?(session, snap.state, snap) }
+        // Finished: the count will not move again, so stop asking.
+        if snap.state == .done { timers.removeValue(forKey: id)?.invalidate() }
+        if Self.shouldPush(from: previous, to: snap.state), let text = Self.pushText(snap) {
+            RosterNotifier.post(kind: snap.state == .done ? .jobDone : .jobStalled,
+                                sessionId: session.id.uuidString, resumeId: session.resumeId,
+                                title: text.title, body: text.body, answerable: false,
+                                sessionTitle: session.title)
+        }
+    }
+
+    /// One push when a job moves into `stalled` or `done`; none on its first reading,
+    /// so a restored or re-registered job does not repeat an old push.
+    static func shouldPush(from previous: JobState?, to next: JobState) -> Bool {
+        guard let previous, previous != next else { return false }
+        return next == .stalled || next == .done
+    }
+
+    static func pushText(_ job: JobSnapshot) -> (title: String, body: String)? {
+        switch job.state {
+        case .stalled: return (job.label, "\(job.done)/\(job.total) で止まっている")
+        case .done: return (job.label, "完了")
+        case .measuring, .running, .unknown: return nil
+        }
     }
 
     /// Runs off the main thread; `completion` is called on the main queue. A run past
