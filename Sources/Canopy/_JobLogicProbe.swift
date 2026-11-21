@@ -65,18 +65,49 @@ enum JobLogicProbe {
         let closed = JobWatcher.runSync(["/bin/sh", "-c", "echo 1/10; exec >/dev/null 2>&1; sleep 30"],
                                         env: ProcessInfo.processInfo.environment, timeout: 1)
         let took = Date().timeIntervalSince(started)
-        record("limits: a probe that closes stdout and keeps running is cut off at the timeout",
-               closed.status == JobWatcher.timedOut && took < 5, "status=\(closed.status) took=\(took)")
+        record("limits: a probe that closes stdout and keeps running is cut off at the timeout, output kept",
+               closed.status == JobWatcher.timedOut && took < 5 && closed.output?.contains("1/10") == true,
+               "status=\(closed.status) took=\(took)")
+        let shareStart = Date()
+        let late = JobWatcher.runSync(["/bin/sh", "-c", "sleep 0.8; exec >/dev/null 2>&1; sleep 30"],
+                                      env: ProcessInfo.processInfo.environment, timeout: 1)
+        let shareTook = Date().timeIntervalSince(shareStart)
+        record("limits: the pipe and the exit share one deadline", late.status == JobWatcher.timedOut && shareTook < 1.7,
+               "took=\(shareTook)")
+        let tidy = JobWatcher.runSync(["/bin/sh", "-c", "echo 3/10; exec >/dev/null 2>&1; sleep 0.3"],
+                                      env: ProcessInfo.processInfo.environment, timeout: 5)
+        record("limits: a probe that closes stdout and then exits in time is a reading",
+               tidy.status == 0 && tidy.output?.contains("3/10") == true, "\(tidy)")
+        let failing = JobWatcher.runSync(["/bin/sh", "-c", "echo 2/10; exit 7"], env: ProcessInfo.processInfo.environment, timeout: 5)
+        record("limits: a probe's exit status comes through", failing.status == 7, "\(failing.status)")
 
         record("limits: an unfinished job keeps an idle session from being reaped",
                ShimProcess.reaperHolds(heldByPhone: false, openedByControl: false, watched: false, activeJob: true), "")
         record("limits: no job leaves the reaper as before",
                !ShimProcess.reaperHolds(heldByPhone: false, openedByControl: false, watched: false, activeJob: false), "")
-        let running = JobSnapshot(label: "x", done: 1, total: 10, etaAt: nil, state: .running, stalledSince: nil)
-        let finished = JobSnapshot(label: "x", done: 10, total: 10, etaAt: nil, state: .done, stalledSince: nil)
-        record("limits: a finished job no longer holds the session",
-               JobWatcher.holdsSession(running) && JobWatcher.holdsSession(JobSnapshot(label: "x", done: 0, total: 0, etaAt: nil, state: .measuring, stalledSince: nil))
-                   && !JobWatcher.holdsSession(finished) && !JobWatcher.holdsSession(nil), "")
+        let now = Date(timeIntervalSince1970: 2_000_000)
+        func job(_ state: JobState, stalledFor hours: Double = 0) -> JobSnapshot {
+            JobSnapshot(label: "x", done: 1, total: 10, etaAt: nil, state: state,
+                        stalledSince: state == .stalled ? now.addingTimeInterval(-hours * 3600) : nil)
+        }
+        let expected: [JobState: Bool] = [.measuring: true, .running: true, .stalled: true, .unknown: false, .done: false]
+        for state in JobState.allCases {
+            record("limits: a \(state.rawValue) job \(expected[state]! ? "holds" : "does not hold") its session",
+                   JobWatcher.holdsSession(job(state), now: now) == expected[state]!, "")
+        }
+        record("limits: a stall older than the hold limit lets the session go",
+               !JobWatcher.holdsSession(job(.stalled, stalledFor: JobWatcher.stalledHoldSeconds / 3600 + 0.1), now: now)
+                   && JobWatcher.holdsSession(job(.stalled, stalledFor: JobWatcher.stalledHoldSeconds / 3600 - 0.1), now: now), "")
+        record("limits: no job holds nothing", !JobWatcher.holdsSession(nil, now: now), "")
+
+        let dir = URL(fileURLWithPath: "/tmp/probe/job-held")
+        let withJob = OpenSession(origin: .local(dir), resumeId: "job", title: "J", project: "P")
+        withJob.job = job(.running)
+        let doneJob = OpenSession(origin: .local(dir), resumeId: "done", title: "D", project: "P")
+        doneJob.job = job(.done)
+        let carried = DaemonHeldSessions.capture([withJob, doneJob]) { _, _ in true }
+        record("limits: a session held by its job is carried across a daemon restart",
+               carried.entries.map(\.resumeId) == ["job"], "\(carried.entries.map(\.resumeId))")
     }
 
     /// Findings from /ship-it on #434 and Canopy-Mobile#108.

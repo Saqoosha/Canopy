@@ -2984,10 +2984,10 @@ enum SidebarLogicProbe {
                 record("reaper: a session the phone opened is kept however long nobody watches",
                        !SessionReaper.shouldReap(held, now: reapT0, limit: reapLimit))
                 record("reaper hold: the phone's is held; a control session only while a listen covers it",
-                       ShimProcess.reaperHolds(heldByPhone: true, openedByControl: false, watched: false)
-                           && ShimProcess.reaperHolds(heldByPhone: false, openedByControl: true, watched: true)
-                           && !ShimProcess.reaperHolds(heldByPhone: false, openedByControl: true, watched: false)
-                           && !ShimProcess.reaperHolds(heldByPhone: false, openedByControl: false, watched: true))
+                       ShimProcess.reaperHolds(heldByPhone: true, openedByControl: false, watched: false, activeJob: false)
+                           && ShimProcess.reaperHolds(heldByPhone: false, openedByControl: true, watched: true, activeJob: false)
+                           && !ShimProcess.reaperHolds(heldByPhone: false, openedByControl: true, watched: false, activeJob: false)
+                           && !ShimProcess.reaperHolds(heldByPhone: false, openedByControl: false, watched: true, activeJob: false))
                 var listenWatch = ControlListenWatch()
                 let watchA = UUID(), watchAll = UUID()
                 record("listen watch: nothing is watched before any listen",

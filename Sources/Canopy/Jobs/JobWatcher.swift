@@ -211,6 +211,9 @@ final class JobWatcher {
             return
         }
         missingSince[id] = nil
+        // A session reopened after a daemon restart has no job until its next reading; the
+        // reaper's hold needs it now.
+        if let session = session(id), session.job == nil { session.job = track.snapshot(now: Date()) }
         // A finished count will not move again: keep the job for the row, stop asking.
         guard track.lastState != .done, track.shouldRun(now: Date()) else { return }
         running.insert(id)
@@ -252,10 +255,19 @@ final class JobWatcher {
         }
     }
 
-    /// Whether a session's job keeps the daemon from reaping it: any state but `done`.
-    nonisolated static func holdsSession(_ job: JobSnapshot?) -> Bool {
+    /// A stall holds its session this long; past it the job is taken as dead.
+    nonisolated static let stalledHoldSeconds: TimeInterval = 6 * 3600
+
+    /// Whether a session's job keeps the daemon from reaping it: one that is measuring or
+    /// running, or stalled for under `stalledHoldSeconds`. Never `unknown` (its probe keeps
+    /// failing, so nothing says the job is alive) or `done`.
+    nonisolated static func holdsSession(_ job: JobSnapshot?, now: Date = Date()) -> Bool {
         guard let job else { return false }
-        return job.state != .done
+        switch job.state {
+        case .measuring, .running: return true
+        case .stalled: return job.stalledSince.map { now.timeIntervalSince($0) < stalledHoldSeconds } ?? true
+        case .unknown, .done: return false
+        }
     }
 
     /// One push when a job moves into `stalled` or `done`; none on its first reading,
@@ -334,6 +346,11 @@ final class JobWatcher {
         if !finished || overflow {
             reader.readabilityHandler = nil
             killTree(pid, group: group == pid ? group : nil)
+            // A process stuck in the kernel (a hung network mount) outlives SIGKILL: give up on it.
+            if exited.wait(timeout: .now() + 5) == .timedOut {
+                logger.error("probe pid \(pid) did not exit after SIGKILL")
+                return (buffer.withLock { String(decoding: $0.data.suffix(64 * 1024), as: UTF8.self) }, timedOut)
+            }
         }
         process.waitUntilExit()
         let output = buffer.withLock { String(decoding: $0.data.suffix(64 * 1024), as: UTF8.self) }

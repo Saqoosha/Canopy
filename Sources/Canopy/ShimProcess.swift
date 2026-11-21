@@ -122,7 +122,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// while a `listen` covers it, so a client that went away does not leave it running.
     /// An unfinished registered job holds its session too: reaping it would drop the job.
     nonisolated static func reaperHolds(heldByPhone: Bool, openedByControl: Bool, watched: Bool,
-                                        activeJob: Bool = false) -> Bool {
+                                        activeJob: Bool) -> Bool {
         heldByPhone || (openedByControl && watched) || activeJob
     }
 

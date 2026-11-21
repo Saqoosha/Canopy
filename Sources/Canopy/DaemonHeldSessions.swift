@@ -38,12 +38,13 @@ struct DaemonHeldSessions: Codable, Equatable {
     /// later could run a second CLI on a transcript the app has since resumed itself.
     static let maxAge: TimeInterval = 10 * 60
 
-    /// Held or control-opened, local, and resumable. `hasTranscript` is a parameter so the
+    /// Held (by the phone or by an unfinished job) or control-opened, local, and resumable. `hasTranscript` is a parameter so the
     /// probe does not touch the disk; a session with no transcript yet cannot be resumed.
     static func capture(_ sessions: [OpenSession], now: Date = Date(),
                         hasTranscript: (OpenSession, URL) -> Bool) -> DaemonHeldSessions {
         DaemonHeldSessions(entries: sessions.compactMap { session in
-            guard session.heldOpenByPhone || session.openedByControl, case .local(let dir) = session.origin,
+            guard session.heldOpenByPhone || session.openedByControl || JobWatcher.holdsSession(session.job),
+                  case .local(let dir) = session.origin,
                   hasTranscript(session, dir) else { return nil }
             return Entry(key: session.id.uuidString, resumeId: session.resumeId, directory: dir.path,
                          title: session.title, model: session.model, effort: session.effortLevel,
