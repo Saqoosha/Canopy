@@ -905,7 +905,8 @@ enum ClaudeSessionHistory {
     }
 
     /// The sidebar row's label before `SessionTitleStore` gets a say: the
-    /// session's first user message, else `"Untitled"`. The CLI's `ai-title`
+    /// first prompt the user typed, else the first user record's raw text,
+    /// else `"Untitled"`. The CLI's `ai-title`
     /// records are not read; see `HeaderScanner.consume`. Exposed for the
     /// sidebar logic probe.
     static func title(atPath path: String) -> String {
@@ -1125,7 +1126,7 @@ enum ClaudeSessionHistory {
 
     /// Bytes requested on the first read of every session, and the size of
     /// each escalation chunk after it — a smaller file reads less. Sized so
-    /// large base64 image attachments don't push `ai-title` past the window.
+    /// large base64 image attachments don't push the header records past it.
     /// Non-private for the same reason as `metadataMaxScanSize`.
     /// Also the SSH remote scan's window, interpolated into the script
     /// `RemoteSessionHistory.remoteScript` builds — which is the second reason
@@ -1561,13 +1562,8 @@ extension ClaudeSessionHistory {
                 stopScan = true
             }
 
-            // `ai-title` records are deliberately not read. The CLI writes them
-            // even when Canopy forwards `persist: false`, and it generates them
-            // inside the session, so the user's persona (CLAUDE.md, output
-            // style) writes them: 20 of the 38 titled sessions in the week of
-            // 2026-11-16 had persona interjections in their `aiTitle`. Canopy's
-            // own out-of-session title (`SessionTitleStore`) wins when present;
-            // until then the first user message is the neutral fallback.
+            // `ai-title` is not read: it is generated inside the session, so it
+            // carries the user's persona (20 of 38 in the week of 2026-11-16).
 
             guard type == "user" else { return }
             sawUserRecord = true
@@ -1613,7 +1609,7 @@ extension ClaudeSessionHistory {
         mutating func noteRelocated(_ cwd: String) { lastRelocatedCwd = cwd }
 
         var result: (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool, startedAt: Date?, firstPrompt: String?) {
-            (firstUserMessage ?? "Untitled",
+            (firstPrompt.map { String($0.prefix(100)) } ?? firstUserMessage ?? "Untitled",
              lastRelocatedCwd ?? firstCwd,
              isBackgroundScheduled,
              entrypoint?.hasPrefix("sdk-") == true,

@@ -603,6 +603,10 @@ enum SidebarLogicProbe {
         let aiTitleIgnoredJSONL =
             "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"typed prompt\"}}\n"
             + "{\"type\":\"ai-title\",\"aiTitle\":\"PERSONA TITLE\"}\n"
+        // A slash command opens with a meta caveat record; the title is what was typed after it.
+        let caveatFirstJSONL =
+            "{\"type\":\"user\",\"isMeta\":true,\"message\":{\"role\":\"user\",\"content\":\"<local-command-caveat>Caveat: generated</local-command-caveat>\"}}\n"
+            + "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"typed after caveat\"}}\n"
         let arrayContentJSONL =
             "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":"
             + "[{\"type\":\"text\",\"text\":\"first block\"},{\"type\":\"text\",\"text\":\"second block\"}]}}"
@@ -653,10 +657,11 @@ enum SidebarLogicProbe {
         let exactMultiplePath = writeProbeJSONL(exactMultipleJSONL)
         let arrayContentPath = writeProbeJSONL(arrayContentJSONL)
         let aiTitleIgnoredPath = writeProbeJSONL(aiTitleIgnoredJSONL)
+        let caveatFirstPath = writeProbeJSONL(caveatFirstJSONL)
         defer {
             for path in [giantLeadingPath, overCeilingPath, giantScheduledPath, noTrailingNewlinePath,
                          escalationGatePath, escalatedRelocatedPath, exactMultiplePath, arrayContentPath,
-                         textlessUserPath, deepEscalationPath, invalidUTF8Path, aiTitleIgnoredPath] {
+                         textlessUserPath, deepEscalationPath, invalidUTF8Path, aiTitleIgnoredPath, caveatFirstPath] {
                 if let path { try? FileManager.default.removeItem(atPath: path) }
             }
         }
@@ -717,6 +722,9 @@ enum SidebarLogicProbe {
         record("metadata: the CLI's ai-title is ignored for the first user message",
                aiTitleIgnoredPath.map { ClaudeSessionHistory.title(atPath: $0) } == "typed prompt",
                "got \(aiTitleIgnoredPath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
+        record("metadata: a leading meta caveat does not become the title",
+               caveatFirstPath.map { ClaudeSessionHistory.title(atPath: $0) } == "typed after caveat",
+               "got \(caveatFirstPath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
         record("metadata: array content joins into the title",
                arrayContentPath.map { ClaudeSessionHistory.title(atPath: $0) } == "first block second block",
                "got \(arrayContentPath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
