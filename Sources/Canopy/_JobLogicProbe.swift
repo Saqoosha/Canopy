@@ -10,6 +10,48 @@ enum JobLogicProbe {
         watcher(record)
         pushes(record)
         display(record)
+        reviewFixes(record)
+    }
+
+    /// Findings from the final review (2026-11-21), each pinned before its fix.
+    @MainActor
+    private static func reviewFixes(_ record: (String, Bool, String) -> Void) {
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        func s(_ min: Double, _ d: Int, _ tot: Int = 10) -> JobSample { JobSample(at: t0.addingTimeInterval(min * 60), done: d, total: tot) }
+        func ev(_ ss: [JobSample], _ nowMin: Double, failures: Int = 0) -> JobSnapshot {
+            JobEstimator.evaluate(label: "x", samples: ss, failures: failures, now: t0.addingTimeInterval(nowMin * 60), stallMinutes: nil)
+        }
+        // I1: one unit left at 10 min per unit, read 12 min after the last move.
+        let late = ev([s(0, 7), s(10, 8), s(20, 9)], 32)
+        record("review: the finish time is never in the past",
+               late.state == .running && (late.etaAt.map { $0 >= t0.addingTimeInterval(32 * 60) } ?? false), "\(late)")
+        // I2: a first unit that takes 20 min is not a stall.
+        record("review: a slow first unit is still measuring at 20 min", ev([s(0, 0, 100)], 20).state == .measuring, "")
+        record("review: a job that never moves stalls after the first-unit floor", ev([s(0, 0, 100)], 61).state == .stalled, "")
+        // M2: a failed reading never turns a job into a stall.
+        record("review: a failing probe does not report a stall",
+               ev([s(0, 300, 793), s(5, 340, 793), s(10, 380, 793)], 26, failures: 1).state != .stalled, "")
+
+        // I3: a timed-out ssh probe says so, and an unknown job backs off.
+        let remote = JobSpec(resumeId: "r", label: "L", probe: "p", host: "rt4090", total: nil, interval: 150, stallMinutes: nil)
+        var track = JobTrack(spec: remote)
+        track.record(output: nil, exitStatus: -1, at: t0)
+        record("review: a timed-out ssh probe carries a note", track.note?.contains("ssh") == true, "\(String(describing: track.note))")
+        track.record(output: nil, exitStatus: -1, at: t0.addingTimeInterval(150))
+        track.record(output: nil, exitStatus: -1, at: t0.addingTimeInterval(300))
+        record("review: an unknown job waits 15 min between runs",
+               !track.shouldRun(now: t0.addingTimeInterval(450)) && track.shouldRun(now: t0.addingTimeInterval(300 + 15 * 60)), "")
+        var healthy = JobTrack(spec: remote)
+        healthy.record(output: "1/10", exitStatus: 0, at: t0)
+        record("review: a healthy job runs every tick", healthy.shouldRun(now: t0.addingTimeInterval(150)), "")
+
+        // M1: a probe whose pipeline hangs is killed at the timeout, children included.
+        let started = Date()
+        let hung = JobWatcher.runSync(["/bin/sh", "-c", "sleep 30 | cat"], env: ProcessInfo.processInfo.environment, timeout: 1)
+        let took = Date().timeIntervalSince(started)
+        record("review: a hung pipeline is killed at the timeout", hung.status == -1 && took < 5, "status=\(hung.status) took=\(took)")
+        let ok = JobWatcher.runSync(["/bin/sh", "-c", "echo 3/10"], env: ProcessInfo.processInfo.environment, timeout: 5)
+        record("review: a quick probe returns its output", ok.status == 0 && ok.output?.contains("3/10") == true, "\(ok)")
     }
 
     @MainActor

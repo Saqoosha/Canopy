@@ -39,6 +39,9 @@ enum JobEstimator {
     static let windowMinutes: Double = 15
     static let stallFloorMinutes: Double = 15
     static let stallMedianFactor: Double = 3
+    /// Before the count has moved twice there is no time per unit to scale by, so a stall
+    /// needs this long without a move: one epoch of a slow training run can take 20 min.
+    static let firstUnitStallMinutes: Double = 60
 
     /// The last `N/M` in `output`, or with a known `total`, the last integer.
     /// Nil when the output holds no number: a failed reading, never `done = 0`.
@@ -69,8 +72,11 @@ enum JobEstimator {
         let points = changePoints(current)
         let lastChange = points.last!
         let gaps = zip(points, points.dropFirst()).map { $1.at.timeIntervalSince($0.at) / 60 }
-        let threshold = stallMinutes ?? max(stallFloorMinutes, stallMedianFactor * (median(gaps) ?? 0))
-        if now.timeIntervalSince(lastChange.at) >= threshold * 60 {
+        let threshold = stallMinutes
+            ?? (gaps.isEmpty ? firstUnitStallMinutes : max(stallFloorMinutes, stallMedianFactor * median(gaps)!))
+        // A failed reading says nothing about progress: only a reading that saw the count
+        // unchanged may call a stall.
+        if failures == 0 && now.timeIntervalSince(lastChange.at) >= threshold * 60 {
             return snapshot(.stalled, stalledSince: lastChange.at)
         }
         guard points.count >= 2 else { return snapshot(.measuring) }
@@ -81,7 +87,8 @@ enum JobEstimator {
         let first = window.first!, end = window.last!
         let rate = Double(end.done - first.done) / end.at.timeIntervalSince(first.at)
         guard rate > 0 else { return snapshot(.measuring) }
-        return snapshot(.running, eta: end.at.addingTimeInterval(Double(end.total - end.done) / rate))
+        // From now, not from the last move: a unit still in progress is not finished yet.
+        return snapshot(.running, eta: now.addingTimeInterval(Double(end.total - end.done) / rate))
     }
 
     /// Readings after the last restart: a count that went down or a total that changed

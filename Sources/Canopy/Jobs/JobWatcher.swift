@@ -25,11 +25,23 @@ struct JobTrack: Codable, Equatable {
     var samples: [JobSample] = []
     var failures = 0
     var note: String?
+    /// When the probe last ran, so an `unknown` job can back off.
+    var lastRun: Date?
+
+    /// Between runs of a job whose probe keeps failing. Each ssh retry can raise a
+    /// 1Password approval nobody sees, and the watcher pages for every one.
+    static let unknownRetrySeconds: TimeInterval = 15 * 60
 
     init(spec: JobSpec) { self.spec = spec }
 
     /// Folds one probe run in. Output without a count is a failure, never `done = 0`.
+    func shouldRun(now: Date) -> Bool {
+        guard failures >= JobEstimator.failureLimit, let lastRun else { return true }
+        return now.timeIntervalSince(lastRun) >= Self.unknownRetrySeconds
+    }
+
     mutating func record(output: String?, exitStatus: Int32, at now: Date) {
+        lastRun = now
         if exitStatus == 0, let output, let count = JobEstimator.parse(output, total: spec.total) {
             samples.append(JobSample(at: now, done: count.done, total: count.total))
             samples.removeAll { now.timeIntervalSince($0.at) > Self.keepSeconds }
@@ -38,7 +50,12 @@ struct JobTrack: Codable, Equatable {
         } else {
             failures += 1
             // ssh itself exits 255; with BatchMode that is almost always auth or reachability.
-            note = spec.host != nil && exitStatus == 255 ? "ssh の認証に失敗" : nil
+            // -1 is our timeout: over ssh, most likely a 1Password approval nobody saw.
+            switch (spec.host != nil, exitStatus) {
+            case (true, 255): note = "ssh の認証に失敗"
+            case (true, -1): note = "ssh が応答しない（1Password の承認待ちかも）"
+            default: note = nil
+            }
         }
     }
 
@@ -144,7 +161,7 @@ final class JobWatcher {
     }
 
     private func tick(_ id: String) {
-        guard let track = tracks[id], !running.contains(id) else { return }
+        guard let track = tracks[id], !running.contains(id), track.shouldRun(now: Date()) else { return }
         if session(id) == nil {
             let since = missingSince[id] ?? Date()
             missingSince[id] = since
@@ -206,34 +223,49 @@ final class JobWatcher {
         }
     }
 
-    /// Runs off the main thread; `completion` is called on the main queue. A run past
-    /// `timeout` is terminated and reported as a failure (status -1).
+    /// Runs off the main thread; `completion` is called on the main queue.
     nonisolated private static func run(_ argv: [String], env: [String: String], timeout: TimeInterval,
                                         completion: @escaping @Sendable (String?, Int32) -> Void) {
         DispatchQueue.global(qos: .utility).async {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: argv[0])
-            process.arguments = Array(argv.dropFirst())
-            process.environment = env
-            process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
-            process.standardInput = FileHandle.nullDevice
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = FileHandle.nullDevice
-            do { try process.run() } catch {
-                DispatchQueue.main.async { completion(nil, -1) }
-                return
-            }
-            let killer = DispatchWorkItem { if process.isRunning { process.terminate() } }
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            killer.cancel()
-            let timedOut = process.terminationReason == .uncaughtSignal
-            let output = String(decoding: data.suffix(64 * 1024), as: UTF8.self)
-            let status = timedOut ? -1 : process.terminationStatus
-            DispatchQueue.main.async { completion(output, status) }
+            let result = runSync(argv, env: env, timeout: timeout)
+            DispatchQueue.main.async { completion(result.output, result.status) }
         }
+    }
+
+    /// Runs `argv` and waits. Past `timeout` the process and its children are killed and the
+    /// status is -1: a pipeline's children hold the pipe open, so killing only `sh` would
+    /// leave the read blocked and the job frozen on its last reading.
+    nonisolated static func runSync(_ argv: [String], env: [String: String], timeout: TimeInterval)
+        -> (output: String?, status: Int32) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: argv[0])
+        process.arguments = Array(argv.dropFirst())
+        process.environment = env
+        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        process.standardInput = FileHandle.nullDevice
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return (nil, -1) }
+        let pid = process.processIdentifier
+        let timedOut = OSAllocatedUnfairLock(initialState: false)
+        let killer = DispatchWorkItem {
+            guard process.isRunning else { return }
+            timedOut.withLock { $0 = true }
+            // Children first (by parent pid, never by name), then the shell.
+            let pkill = Process()
+            pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            pkill.arguments = ["-KILL", "-P", String(pid)]
+            try? pkill.run()
+            pkill.waitUntilExit()
+            kill(pid, SIGKILL)
+        }
+        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        killer.cancel()
+        let output = String(decoding: data.suffix(64 * 1024), as: UTF8.self)
+        return timedOut.withLock { $0 } ? (output, -1) : (output, process.terminationStatus)
     }
 
     private func session(_ resumeId: String) -> OpenSession? {
