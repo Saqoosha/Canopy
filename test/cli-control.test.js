@@ -174,3 +174,34 @@ test("keeps the child that carries --input-format", () => {
   assert.strictEqual(cli.stdin.lines.length, 1);
   assert.deepStrictEqual(git.stdin.lines, []);
 });
+
+test("a later CLI that exited does not hide the running one", () => {
+  const control = freshControl();
+  const session = runningCli(control);
+  const spare = runningCli(control);
+  spare.exitCode = 0;
+  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, () => {});
+  assert.strictEqual(session.stdin.lines.length, 1);
+  assert.deepStrictEqual(spare.stdin.lines, []);
+});
+
+test("prefers the CLI the extension wrote a user message to", () => {
+  const control = freshControl();
+  const session = runningCli(control);
+  const spare = runningCli(control);
+  session.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content: "hi" } }) + "\n");
+  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, () => {});
+  assert.strictEqual(session.stdin.lines.length, 2);
+  assert.strictEqual(JSON.parse(session.stdin.lines[1]).type, "control_request");
+  assert.deepStrictEqual(spare.stdin.lines, []);
+});
+
+test("falls back to the newest running CLI once the session's has exited", () => {
+  const control = freshControl();
+  const first = runningCli(control);
+  const second = runningCli(control);
+  first.stdin.write('{"type":"user"}\n');
+  first.exitCode = 0;
+  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, () => {});
+  assert.strictEqual(second.stdin.lines.length, 1);
+});

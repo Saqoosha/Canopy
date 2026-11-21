@@ -5,16 +5,40 @@
 
 const { StringDecoder } = require("node:string_decoder");
 
-let cliChild = null;
+// Every CLI spawned, newest last. The extension also starts a short-lived one (cwd
+// `untrusted-start`) after the session's, so "the last spawn" can be a dead process.
+let cliChildren = [];
+// The one the extension last wrote a user message to: the session's conversation.
+let sessionChild = null;
+
+const USER_LINE = '"type":"user"';
 
 // Only the CLI spawn carries `--input-format`; git, ripgrep and MCP do not.
 function trackCliSpawn(child_process) {
   const origSpawn = child_process.spawn;
   child_process.spawn = function (command, args) {
     const child = origSpawn.apply(this, arguments);
-    if (Array.isArray(args) && args.includes("--input-format")) cliChild = child;
+    if (Array.isArray(args) && args.includes("--input-format")) {
+      cliChildren = cliChildren.filter(isRunning).concat(child);
+      const stdin = child.stdin;
+      if (stdin && typeof stdin.write === "function") {
+        const origWrite = stdin.write;
+        stdin.write = function (chunk) {
+          if (sessionChild !== child && String(chunk).includes(USER_LINE)) {
+            sessionChild = child;
+            process.stderr.write(`[cli-control] session CLI is pid ${child.pid}\n`);
+          }
+          return origWrite.apply(this, arguments);
+        };
+      }
+    }
     return child;
   };
+}
+
+function cliForControl() {
+  if (isRunning(sessionChild)) return sessionChild;
+  return cliChildren.filter(isRunning).pop() ?? null;
 }
 
 // A child killed by a signal keeps `exitCode` null and sets `signalCode`.
@@ -24,8 +48,8 @@ function isRunning(child) {
 }
 
 function sendSetCwd({ requestId, path, trustedDirectory }, write) {
-  const child = cliChild;
-  if (!isRunning(child)) {
+  const child = cliForControl();
+  if (!child) {
     write({ type: "set_cwd_result", requestId, error: "no running CLI" });
     return;
   }

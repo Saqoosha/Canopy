@@ -4490,6 +4490,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         case .send(let requestId, let path, let trustedDirectory):
             var message: [String: Any] = ["type": "set_cwd", "requestId": requestId, "path": path]
             if let trustedDirectory { message["trustedDirectory"] = trustedDirectory }
+            logger.notice("[move] asking the CLI to move")
             sendToShim(message)
         case .record(let directory):
             // Recorded now, so a restart for any other reason also starts there.
