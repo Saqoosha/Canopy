@@ -905,8 +905,9 @@ enum ClaudeSessionHistory {
     }
 
     /// The sidebar row's label before `SessionTitleStore` gets a say: the
-    /// session's `ai-title` if one was written, else its first user message,
-    /// else `"Untitled"`. Exposed for the sidebar logic probe.
+    /// session's first user message, else `"Untitled"`. The CLI's `ai-title`
+    /// records are not read; see `HeaderScanner.consume`. Exposed for the
+    /// sidebar logic probe.
     static func title(atPath path: String) -> String {
         extractMetadata(fromPath: path).title
     }
@@ -1481,7 +1482,6 @@ extension ClaudeSessionHistory {
     /// as the machine is used, so the two are not reconcilable and neither is
     /// restated as the other's.
     struct HeaderScanner {
-        private var aiTitle: String?
         private var firstUserMessage: String?
         private var firstCwd: String?
         /// The first timestamped record's `timestamp`: when the session started.
@@ -1561,11 +1561,13 @@ extension ClaudeSessionHistory {
                 stopScan = true
             }
 
-            if aiTitle == nil, type == "ai-title",
-               let value = json["aiTitle"] as? String, !value.isEmpty
-            {
-                aiTitle = value
-            }
+            // `ai-title` records are deliberately not read. The CLI writes them
+            // even when Canopy forwards `persist: false`, and it generates them
+            // inside the session, so the user's persona (CLAUDE.md, output
+            // style) writes them: 20 of the 38 titled sessions in the week of
+            // 2026-11-16 had persona interjections in their `aiTitle`. Canopy's
+            // own out-of-session title (`SessionTitleStore`) wins when present;
+            // until then the first user message is the neutral fallback.
 
             guard type == "user" else { return }
             sawUserRecord = true
@@ -1611,7 +1613,7 @@ extension ClaudeSessionHistory {
         mutating func noteRelocated(_ cwd: String) { lastRelocatedCwd = cwd }
 
         var result: (title: String, cwd: String?, isBackgroundScheduled: Bool, isAutomated: Bool, startedAt: Date?, firstPrompt: String?) {
-            (aiTitle ?? firstUserMessage ?? "Untitled",
+            (firstUserMessage ?? "Untitled",
              lastRelocatedCwd ?? firstCwd,
              isBackgroundScheduled,
              entrypoint?.hasPrefix("sdk-") == true,

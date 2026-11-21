@@ -538,14 +538,15 @@ enum SidebarLogicProbe {
         // below fail if the `sawUserRecord` break is deleted — every other one
         // reports the same answer whether the scan stops at the head chunk or
         // reads to the ceiling — so without the two of them, the one line
-        // holding the whole cost argument is ungated. A cheap `ai-title` past the head chunk is the
-        // lever: it wins over `firstUserMessage` if and only if it is read,
-        // and the tail scan cannot rescue it because that path matches only
-        // `relocated`.
+        // holding the whole cost argument is ungated. A record carrying
+        // `entrypoint: sdk-cli` past the head chunk is the lever: it flags the
+        // session automated if and only if it is read (the first record has no
+        // entrypoint), and the tail scan cannot rescue it because that path
+        // matches only `relocated`.
         let escalationGateJSONL =
             "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"gate marker\"}}\n"
             + filler(head + head / 2)
-            + "{\"type\":\"ai-title\",\"aiTitle\":\"ESCALATED PAST THE GATE\"}\n"
+            + "{\"type\":\"assistant\",\"entrypoint\":\"sdk-cli\"}\n"
         // The changed tail bound, exercised where it actually differs — which
         // took two tries to build. A `relocated` record merely sitting after an
         // escalation is NOT enough: the line scan consumes it on its way to the
@@ -587,7 +588,7 @@ enum SidebarLogicProbe {
         // confirm the end before discarding what it holds.
         let exactMultipleHead =
             "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"first\"}}\n"
-        let exactMultipleTail = "{\"type\":\"ai-title\",\"aiTitle\":\"EXACT MULTIPLE\"}"
+        let exactMultipleTail = "{\"type\":\"assistant\",\"entrypoint\":\"sdk-cli\"}"
         let exactMultiplePad = head - exactMultipleHead.utf8.count - exactMultipleTail.utf8.count - 1
         record("metadata fixture: exact-multiple padding fits inside the head chunk",
                exactMultiplePad > 0, "pad=\(exactMultiplePad)")
@@ -597,6 +598,11 @@ enum SidebarLogicProbe {
         // Array content on the first user record — the shape the title path
         // joins rather than reads whole, and the branch the `guard type ==
         // "user"` hoist moved past.
+        // The CLI's in-session `ai-title` carries the user's persona, so the
+        // scanner ignores it and the first user message stays the label.
+        let aiTitleIgnoredJSONL =
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"typed prompt\"}}\n"
+            + "{\"type\":\"ai-title\",\"aiTitle\":\"PERSONA TITLE\"}\n"
         let arrayContentJSONL =
             "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":"
             + "[{\"type\":\"text\",\"text\":\"first block\"},{\"type\":\"text\",\"text\":\"second block\"}]}}"
@@ -610,7 +616,7 @@ enum SidebarLogicProbe {
             "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":"
             + "[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"ok\"}]}}\n"
             + filler(head + head / 2)
-            + "{\"type\":\"ai-title\",\"aiTitle\":\"MISSED\"}\n"
+            + "{\"type\":\"assistant\",\"entrypoint\":\"sdk-cli\"}\n"
         // The deepest escalation any fixture takes: four records, so the loop
         // runs past three chunks with a live carry. What it pins is escalation
         // DEPTH — capping the loop at two or three chunks fails here and
@@ -646,10 +652,11 @@ enum SidebarLogicProbe {
         let escalatedRelocatedPath = writeProbeJSONL(escalatedRelocatedJSONL)
         let exactMultiplePath = writeProbeJSONL(exactMultipleJSONL)
         let arrayContentPath = writeProbeJSONL(arrayContentJSONL)
+        let aiTitleIgnoredPath = writeProbeJSONL(aiTitleIgnoredJSONL)
         defer {
             for path in [giantLeadingPath, overCeilingPath, giantScheduledPath, noTrailingNewlinePath,
                          escalationGatePath, escalatedRelocatedPath, exactMultiplePath, arrayContentPath,
-                         textlessUserPath, deepEscalationPath, invalidUTF8Path] {
+                         textlessUserPath, deepEscalationPath, invalidUTF8Path, aiTitleIgnoredPath] {
                 if let path { try? FileManager.default.removeItem(atPath: path) }
             }
         }
@@ -681,8 +688,8 @@ enum SidebarLogicProbe {
                noTrailingNewlinePath.map { ClaudeSessionHistory.title(atPath: $0) } == "unterminated final record",
                "got \(noTrailingNewlinePath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
         record("metadata: a text-less user record still ends the escalation",
-               textlessUserPath.map { ClaudeSessionHistory.title(atPath: $0) } == "Untitled",
-               "got \(textlessUserPath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
+               textlessUserPath.map { !ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true,
+               "path=\(textlessUserPath ?? "nil (fixture write failed)")")
         record("metadata: escalation survives three chunks with a live carry",
                deepEscalationPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/deep",
                "got \(deepEscalationPath.flatMap { ClaudeSessionHistory.cwd(atPath: $0) } ?? "nil")")
@@ -696,8 +703,8 @@ enum SidebarLogicProbe {
                ClaudeSessionHistory.metadataMaxScanSize % ClaudeSessionHistory.metadataHeadSize == 0,
                "ceiling=\(ClaudeSessionHistory.metadataMaxScanSize) head=\(ClaudeSessionHistory.metadataHeadSize)")
         record("metadata: escalation stops once a user record has parsed",
-               escalationGatePath.map { ClaudeSessionHistory.title(atPath: $0) } == "gate marker",
-               "got \(escalationGatePath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
+               escalationGatePath.map { !ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true,
+               "path=\(escalationGatePath ?? "nil (fixture write failed)")")
         // Named for the bound, not the escalation: removing escalation entirely
         // leaves this passing, because the tail scan alone rescues the record.
         // It is the sole killer for the tail bound, which is what it is here for.
@@ -705,8 +712,11 @@ enum SidebarLogicProbe {
                escalatedRelocatedPath.map { ClaudeSessionHistory.cwd(atPath: $0) } == "/tmp/probe/escalated-wt",
                "got \(escalatedRelocatedPath.flatMap { ClaudeSessionHistory.cwd(atPath: $0) } ?? "nil")")
         record("metadata: exact chunk-multiple keeps its unterminated last record",
-               exactMultiplePath.map { ClaudeSessionHistory.title(atPath: $0) } == "EXACT MULTIPLE",
-               "got \(exactMultiplePath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
+               exactMultiplePath.map { ClaudeSessionHistory.isAutomatedSession(atPath: $0) } == true,
+               "path=\(exactMultiplePath ?? "nil (fixture write failed)")")
+        record("metadata: the CLI's ai-title is ignored for the first user message",
+               aiTitleIgnoredPath.map { ClaudeSessionHistory.title(atPath: $0) } == "typed prompt",
+               "got \(aiTitleIgnoredPath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
         record("metadata: array content joins into the title",
                arrayContentPath.map { ClaudeSessionHistory.title(atPath: $0) } == "first block second block",
                "got \(arrayContentPath.map { ClaudeSessionHistory.title(atPath: $0) } ?? "nil")")
