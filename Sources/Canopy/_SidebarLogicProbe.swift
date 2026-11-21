@@ -4169,8 +4169,9 @@ enum SidebarLogicProbe {
                        && unmatched.project == "P")
             // A mirror's peer name and job live on its home Mac and reach this one in the roster.
             let remoteJob = JobSnapshot(label: "train", done: 3, total: 10, etaAt: nil, state: .running, stalledSince: nil)
+            store.remoteClock = Date()
             store.noteRemoteState(machineId: "M2", snapshot: RosterSnapshot(
-                machineId: "M2", displayName: "studio", publishedAt: 0, sessionPct: 0, weeklyPct: 0,
+                machineId: "M2", displayName: "studio", publishedAt: Int(Date().timeIntervalSince1970), sessionPct: 0, weeklyPct: 0,
                 panes: [RosterSnapshot.Pane(sessionId: "H1", resumeId: "cli-id", paneIndex: 0, title: "Named there", project: "Moved",
                                             state: "working", stateSince: 0, contextPct: 0, model: "", messageCount: 0, live: true,
                                             job: remoteJob, peerName: "moved-ab")]))
@@ -4184,6 +4185,7 @@ enum SidebarLogicProbe {
                 machineId: "M2", displayName: "studio", publishedAt: Int(Date().timeIntervalSince1970), sessionPct: 0, weeklyPct: 0,
                 panes: [])
             store.remoteRosters["M2"] = freshRoster
+            store.remoteMachineIds = ["M2"]
             store.remoteClock = Date()
             store.expireMirrorState()
             record("mirror row: a fresh roster keeps the mirror's job and peer name",
@@ -4193,6 +4195,15 @@ enum SidebarLogicProbe {
             record("mirror row: a stale roster drops the mirror's job and peer name",
                    started.job == nil && store.peerName(for: started) == nil)
             store.remoteRosters = [:]
+            store.remoteMachineIds = []
+            store.remoteClock = Date()
+            store.noteRemoteState(machineId: "M2", snapshot: RosterSnapshot(
+                machineId: "M2", displayName: "studio", publishedAt: 0, sessionPct: 0, weeklyPct: 0,
+                panes: [RosterSnapshot.Pane(sessionId: "H1", resumeId: "cli-id", paneIndex: 0, title: "Named there", project: "Moved",
+                                            state: "working", stateSince: 0, contextPct: 0, model: "", messageCount: 0, live: true,
+                                            job: remoteJob, peerName: "moved-ab")]))
+            record("mirror row: a stale snapshot does not bring the job back",
+                   started.job == nil && store.peerName(for: started) == nil)
             let namedPane = RosterSnapshot.Pane(sessionId: "s", resumeId: "r", paneIndex: 0, title: "t", project: "p",
                                                 state: "idle", stateSince: 0, contextPct: 0, model: "", messageCount: 0,
                                                 live: true, peerName: "n-1")

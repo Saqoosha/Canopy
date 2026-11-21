@@ -357,7 +357,8 @@ final class SessionStore {
     func expireMirrorState() {
         for session in openSessions {
             guard let machineId = session.origin.mirrorTarget?.machineId else { continue }
-            if let roster = remoteRosters[machineId], !RemoteRosterWatcher.isStale(roster, now: remoteClock) { continue }
+            if remoteMachineIds.contains(machineId), let roster = remoteRosters[machineId],
+               !RemoteRosterWatcher.isStale(roster, now: remoteClock) { continue }
             if session.job != nil { session.job = nil }
             if session.mirrorPeerName != nil { session.mirrorPeerName = nil }
         }
@@ -640,8 +641,9 @@ final class SessionStore {
             session.isWaiting = activity == .background
             session.statusBar.model = pane.model
             // The job and peer name live on the Mac that runs the CLI; a mirror has only these.
-            if pane.job != session.job { session.job = pane.job }
-            if pane.peerName != session.mirrorPeerName { session.mirrorPeerName = pane.peerName }
+            let fresh = !RemoteRosterWatcher.isStale(snapshot, now: remoteClock)
+            if (fresh ? pane.job : nil) != session.job { session.job = fresh ? pane.job : nil }
+            if (fresh ? pane.peerName : nil) != session.mirrorPeerName { session.mirrorPeerName = fresh ? pane.peerName : nil }
             // A new session started from here carries a placeholder id until
             // the origin's CLI names it; follow the origin so Retry re-attaches.
             if let resumeId = pane.resumeId, resumeId != session.resumeId, pane.sessionId == session.mirrorHostSessionId {
