@@ -613,7 +613,7 @@ enum SessionMove {
             guard let resumeId, let carried = loaded,
                   let path = loaded?.paths.removeValue(forKey: key(resumeId)) else { return nil }
             guard now.timeIntervalSince(carried.savedAt) <= maxAge else {
-                logger.notice("dropped a waiting move: its session started \(Int(now.timeIntervalSince(carried.savedAt)), privacy: .public)s after the restart")
+                logger.notice("dropped a waiting move: its session started \(Int(now.timeIntervalSince(carried.savedAt)), privacy: .public)s after it was saved")
                 return nil
             }
             return path
