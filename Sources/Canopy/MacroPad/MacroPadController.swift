@@ -44,6 +44,9 @@ struct MacroPadUnreadTracker {
     struct Snapshot {
         let id: UUID
         let isThinking: Bool
+        /// The session's registered job is done (`JobWatcher`): finishing one marks
+        /// the session unread the way a finished turn does.
+        var jobDone = false
     }
 
     /// How long ago the most recent presence signal — OS-level input on any
@@ -101,6 +104,7 @@ struct MacroPadUnreadTracker {
     var unread: Set<UUID> { Set(marks.keys) }
 
     private var wasThinking: [UUID: Bool] = [:]
+    private var wasJobDone: [UUID: Bool] = [:]
 
 
     /// What one `update` actually did, as distinct from what the set looks
@@ -213,11 +217,16 @@ struct MacroPadUnreadTracker {
         var outcome = Outcome()
         let live = Set(sessions.map(\.id))
         wasThinking = wasThinking.filter { live.contains($0.key) }
+        wasJobDone = wasJobDone.filter { live.contains($0.key) }
         marks = marks.filter { live.contains($0.key) }
 
         for session in sessions {
-            let finished = (wasThinking[session.id] ?? false) && !session.isThinking
+            let turnFinished = (wasThinking[session.id] ?? false) && !session.isThinking
             wasThinking[session.id] = session.isThinking
+            // First sight counts as "already done": a GUI relaunch must not re-mark old jobs.
+            let jobFinished = !(wasJobDone[session.id] ?? session.jobDone) && session.jobDone
+            wasJobDone[session.id] = session.jobDone
+            let finished = turnFinished || jobFinished
             if finished {
                 // `marked` reports the ARMING, not a set transition, and the
                 // difference is not cosmetic: a second turn finishing while
@@ -301,6 +310,7 @@ struct MacroPadUnreadTracker {
     mutating func reset() {
         marks.removeAll()
         wasThinking.removeAll()
+        wasJobDone.removeAll()
     }
 }
 
@@ -978,7 +988,7 @@ final class MacroPadController {
 
         let outcome = tracker.update(
             openSessions.map {
-                MacroPadUnreadTracker.Snapshot(id: $0.id, isThinking: $0.isThinking)
+                MacroPadUnreadTracker.Snapshot(id: $0.id, isThinking: $0.isThinking, jobDone: $0.job?.state == .done)
             },
             lastInteractedSessionId: lastInteractedSessionId,
             interactionSeq: interactionSeq,

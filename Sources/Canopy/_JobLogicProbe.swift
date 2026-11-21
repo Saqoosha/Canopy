@@ -9,6 +9,74 @@ enum JobLogicProbe {
         wire(record)
         watcher(record)
         pushes(record)
+        display(record)
+    }
+
+    @MainActor
+    private static func display(_ record: (String, Bool, String) -> Void) {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+        func at(_ day: Int, _ h: Int, _ m: Int) -> Date {
+            cal.date(from: DateComponents(year: 2026, month: 11, day: day, hour: h, minute: m))!
+        }
+        let now = at(21, 9, 45)
+        record("job display: same-day time", JobDisplay.timeLabel(at(21, 10, 40), now: now, calendar: cal) == "10:40", "")
+        record("job display: next-day time says 明日",
+               JobDisplay.timeLabel(at(22, 1, 20), now: now, calendar: cal) == "明日 1:20",
+               JobDisplay.timeLabel(at(22, 1, 20), now: now, calendar: cal))
+
+        let running = JobSnapshot(label: "IG LOD", done: 328, total: 793, etaAt: at(21, 10, 40), state: .running, stalledSince: nil)
+        let r = JobDisplay.trailing(running, now: now, calendar: cal)
+        record("job display: running shows time and percent", r.top == "10:40" && r.bottom == "41%" && !r.isAlert, "\(r)")
+        let stalled = JobSnapshot(label: "h7", done: 680, total: 1077, etaAt: nil, state: .stalled, stalledSince: at(21, 9, 30))
+        let s = JobDisplay.trailing(stalled, now: now, calendar: cal)
+        record("job display: stalled shows 停止 and minutes", s.top == "停止" && s.bottom == "15m" && s.isAlert, "\(s)")
+        let measuring = JobSnapshot(label: "IG LOD", done: 328, total: 793, etaAt: nil, state: .measuring, stalledSince: nil)
+        let m = JobDisplay.trailing(measuring, now: now, calendar: cal)
+        record("job display: measuring shows 計測中 and percent", m.top == "計測中" && m.bottom == "41%" && !m.isAlert, "\(m)")
+        let unknown = JobSnapshot(label: "IG LOD", done: 328, total: 793, etaAt: nil, state: .unknown, stalledSince: nil,
+                                  note: "ssh の認証に失敗")
+        let u = JobDisplay.trailing(unknown, now: now, calendar: cal)
+        record("job display: unknown shows a dash", u.top == "—" && u.bottom == nil && !u.isAlert, "\(u)")
+
+        record("job display: running help", JobDisplay.help(running, now: now) == "IG LOD 328/793 · あと 55 分",
+               JobDisplay.help(running, now: now))
+        record("job display: unknown help names the note", JobDisplay.help(unknown, now: now) == "IG LOD · ssh の認証に失敗",
+               JobDisplay.help(unknown, now: now))
+        record("job display: stalled line", JobDisplay.stalledLine(stalled) == "680/1077 で止まっている", "")
+        record("job display: progress fraction", abs(JobDisplay.fraction(running) - 328.0 / 793) < 0.0001
+                   && JobDisplay.fraction(JobSnapshot(label: "x", done: 0, total: 0, etaAt: nil, state: .measuring, stalledSince: nil)) == 0, "")
+
+        record("job display: an idle session with a running job draws as background",
+               JobDisplay.ringActivity(.idle, job: running) == .background, "")
+        record("job display: an unread session with a job draws as background",
+               JobDisplay.ringActivity(.unread, job: measuring) == .background, "")
+        record("job display: asking stays asking over a stall", JobDisplay.ringActivity(.asking, job: stalled) == .asking, "")
+        record("job display: a stall draws as error over working", JobDisplay.ringActivity(.working, job: stalled) == .error, "")
+        record("job display: no job keeps the activity", JobDisplay.ringActivity(.idle, job: nil) == .idle, "")
+        let doneJob = JobSnapshot(label: "x", done: 10, total: 10, etaAt: nil, state: .done, stalledSince: nil)
+        record("job display: a done job draws no ring", !JobDisplay.drawsRing(doneJob) && JobDisplay.drawsRing(running), "")
+
+        record("job display: a stalled job puts an idle row in Needs you",
+               JobDisplay.statusGroup(.idle, job: stalled) == .needsYou, "")
+        record("job display: a running job leaves the group alone",
+               JobDisplay.statusGroup(.idle, job: running) == .idle && JobDisplay.statusGroup(.working, job: running) == .working, "")
+
+        var tracker = MacroPadUnreadTracker()
+        let id = UUID()
+        func step(_ jobDone: Bool) -> Bool {
+            tracker.update([.init(id: id, isThinking: false, jobDone: jobDone)], lastInteractedSessionId: nil,
+                           interactionSeq: 0, secondsSincePresence: 1000, isAppActive: false)
+            return tracker.unread.contains(id)
+        }
+        let first = step(false)
+        let finished = step(true)
+        record("job display: a job finishing marks the session unread", !first && finished, "first=\(first) finished=\(finished)")
+        var fresh = MacroPadUnreadTracker()
+        fresh.update([.init(id: id, isThinking: false, jobDone: true)], lastInteractedSessionId: nil,
+                     interactionSeq: 0, secondsSincePresence: 1000, isAppActive: false)
+        let seenDone = fresh.unread.contains(id)
+        record("job display: a job already done when first seen does not mark unread", !seenDone, "")
     }
 
     @MainActor

@@ -50,7 +50,7 @@ enum SidebarStatusGroup: CaseIterable {
         isUnread: (OpenSession.ID) -> Bool
     ) -> [(group: SidebarStatusGroup, rows: [SidebarRow])] {
         let grouped = Dictionary(grouping: openRows) { row -> SidebarStatusGroup in
-            if case .open(let s) = row { return of(SessionActivity.of(s, isUnread: isUnread(s.id))) }
+            if case .open(let s) = row { return JobDisplay.statusGroup(SessionActivity.of(s, isUnread: isUnread(s.id)), job: s.job) }
             return .idle
         }
         return allCases.compactMap { group in
