@@ -13120,7 +13120,8 @@ enum SidebarLogicProbe {
             // sorts low must keep its title over an old one whose id sorts high.
             SessionTitleStore._probeReset()
             let oldHigh = "ffffffff-ffff-4fff-bfff-ffffffffffff"
-            SessionTitleStore.save(title: "old", forSessionId: oldHigh)
+            // Planted with an explicit old savedAt so equal clock ticks cannot fake a tie.
+            SessionTitleStore._probeSetRawBlob(#"{"\#(oldHigh)":{"text":"old","userOwned":false,"savedAt":0}}"#)
             for _ in 0..<(cap - 2) {
                 SessionTitleStore.save(title: "auto", forSessionId: UUID().uuidString)
             }

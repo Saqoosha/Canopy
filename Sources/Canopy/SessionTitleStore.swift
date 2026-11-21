@@ -207,6 +207,14 @@ enum SessionTitleStore {
         }
     }
 
+    /// Lower goes first. A settled record outranks an ordinary one because
+    /// losing it lets regeneration replace a title that matches its branch.
+    private static func evictionRank(_ record: Record?) -> Int {
+        guard let record else { return 0 }
+        if record.userOwned { return 2 }
+        return record.settled == true ? 1 : 0
+    }
+
     /// Persist, trimming to `maxEntries`. Returns false when nothing was
     /// accepted for persistence — which is not the same as reaching disk:
     /// `UserDefaults` flushes asynchronously, so a `true` here is not a promise
@@ -225,14 +233,6 @@ enum SessionTitleStore {
     /// be the id alone, which evicted every new session whose id sorted low:
     /// on 2026-11-21 the store held 104 ordinary titles starting d-f and 1
     /// starting 0-c.
-    /// Lower goes first. A settled record outranks an ordinary one because
-    /// losing it lets regeneration replace a title that matches its branch.
-    private static func evictionRank(_ record: Record?) -> Int {
-        guard let record else { return 0 }
-        if record.userOwned { return 2 }
-        return record.settled == true ? 1 : 0
-    }
-
     @discardableResult
     private static func write(evicting records: [String: Record], protecting protectedId: String?) -> Bool {
         var records = records
