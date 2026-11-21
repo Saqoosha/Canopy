@@ -5,30 +5,79 @@
 
 const { StringDecoder } = require("node:string_decoder");
 
-let cliChild = null;
+// Every CLI spawned, newest last. The extension also starts a short-lived one (cwd
+// `untrusted-start`) after the session's, so "the last spawn" can be a dead process.
+let cliChildren = [];
+// The one the extension last wrote a user message to: the session's conversation.
+let sessionChild = null;
+const spares = new WeakSet();
+
+const USER_LINE = '"type":"user"';
+const SPARE_CWD = "untrusted-start";
+
+function chunkText(chunk) {
+  if (typeof chunk === "string") return chunk;
+  if (chunk instanceof Uint8Array) return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength).toString("utf8");
+  return "";
+}
+
+// True when a line of `text` is a top-level user message; a nested one does not count.
+function hasUserLine(text) {
+  if (!text.includes(USER_LINE)) return false;
+  return text.split("\n").some((line) => {
+    if (!line.includes(USER_LINE)) return false;
+    // A line split across writes does not parse; its first piece still starts this way.
+    if (line.trimStart().startsWith(`{${USER_LINE}`)) return true;
+    try { return JSON.parse(line)?.type === "user"; } catch { return false; }
+  });
+}
 
 // Only the CLI spawn carries `--input-format`; git, ripgrep and MCP do not.
 function trackCliSpawn(child_process) {
   const origSpawn = child_process.spawn;
-  child_process.spawn = function (command, args) {
+  child_process.spawn = function (command, args, options) {
     const child = origSpawn.apply(this, arguments);
-    if (Array.isArray(args) && args.includes("--input-format")) cliChild = child;
+    if (Array.isArray(args) && args.includes("--input-format")) {
+      cliChildren = cliChildren.filter(isRunning).concat(child);
+      const cwd = options && options.cwd != null ? String(options.cwd) : "";
+      if (cwd.replace(/[\\/]+$/, "").split(/[\\/]/).pop() === SPARE_CWD) spares.add(child);
+      const stdin = child.stdin;
+      if (stdin && typeof stdin.write === "function") {
+        const origWrite = stdin.write;
+        stdin.write = function (chunk) {
+          if (sessionChild !== child && hasUserLine(chunkText(chunk))) {
+            sessionChild = child;
+            process.stderr.write(`[cli-control] session CLI is pid ${child.pid}\n`);
+          }
+          return origWrite.apply(this, arguments);
+        };
+      }
+    }
     return child;
   };
+}
+
+// Before any user message, the newest running CLI that is not the spare: it has no conversation to move.
+function cliForControl() {
+  if (isRunning(sessionChild)) return sessionChild;
+  return cliChildren.filter((child) => isRunning(child) && !spares.has(child)).pop() ?? null;
 }
 
 // A child killed by a signal keeps `exitCode` null and sets `signalCode`.
 function isRunning(child) {
   return Boolean(child && child.exitCode === null && child.signalCode == null
-    && child.stdin && !child.stdin.destroyed && child.stdout);
+    && child.stdin && !child.stdin.destroyed && !child.stdin.writableEnded && child.stdout);
 }
 
 function sendSetCwd({ requestId, path, trustedDirectory }, write) {
-  const child = cliChild;
-  if (!isRunning(child)) {
-    write({ type: "set_cwd_result", requestId, error: "no running CLI" });
+  const child = cliForControl();
+  if (!child) {
+    const running = cliChildren.filter(isRunning).length;
+    write({ type: "set_cwd_result", requestId, error: `no running CLI (${cliChildren.length} spawned, ${running} running, none with a conversation)` });
     return;
   }
+  const how = child === sessionChild ? "session" : "newest";
+  process.stderr.write(`[cli-control] set_cwd ${requestId} -> pid ${child.pid} (${how})\n`);
   const controlId = `canopy-set-cwd-${requestId}`;
   const decoder = new StringDecoder("utf8");
   let buffer = "";

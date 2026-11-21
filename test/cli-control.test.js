@@ -174,3 +174,107 @@ test("keeps the child that carries --input-format", () => {
   assert.strictEqual(cli.stdin.lines.length, 1);
   assert.deepStrictEqual(git.stdin.lines, []);
 });
+
+test("a later CLI that exited does not hide the running one", () => {
+  const control = freshControl();
+  const session = runningCli(control);
+  const spare = runningCli(control);
+  spare.exitCode = 0;
+  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, () => {});
+  assert.strictEqual(session.stdin.lines.length, 1);
+  assert.deepStrictEqual(spare.stdin.lines, []);
+});
+
+test("prefers the CLI the extension wrote a user message to", () => {
+  const control = freshControl();
+  const session = runningCli(control);
+  const spare = runningCli(control);
+  session.stdin.write(JSON.stringify({ type: "user", message: { role: "user", content: "hi" } }) + "\n");
+  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, () => {});
+  assert.strictEqual(session.stdin.lines.length, 2);
+  assert.strictEqual(JSON.parse(session.stdin.lines[1]).type, "control_request");
+  assert.deepStrictEqual(spare.stdin.lines, []);
+});
+
+test("a control_request or a nested user object does not mark the session", () => {
+  const control = freshControl();
+  const session = runningCli(control);
+  const other = runningCli(control);
+  session.stdin.write(Buffer.from('{"type":"user","message":{"role":"user","content":"hi"}}\n'));
+  other.stdin.write('{"type":"control_request","request":{"subtype":"initialize","x":{"type":"user"}}}\n');
+  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, () => {});
+  assert.strictEqual(JSON.parse(session.stdin.lines[1]).type, "control_request");
+  assert.strictEqual(other.stdin.lines.length, 1);
+});
+
+test("a newer CLI the extension writes a user message to takes over", () => {
+  const control = freshControl();
+  const first = runningCli(control);
+  const second = runningCli(control);
+  first.stdin.write('{"type":"user"}\n');
+  second.stdin.write('{"type":"user"}\n');
+  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, () => {});
+  assert.strictEqual(first.stdin.lines.length, 1);
+  assert.strictEqual(second.stdin.lines.length, 2);
+});
+
+test("before any user message, a running spare in untrusted-start is passed over", () => {
+  const control = freshControl();
+  const session = fakeChild();
+  const spare = fakeChild();
+  const spawner = { spawn: (_command, _args, options) => (options.cwd.endsWith("untrusted-start") ? spare : session) };
+  control.trackCliSpawn(spawner);
+  spawner.spawn("claude", ["--input-format", "stream-json"], { cwd: "/p" });
+  spawner.spawn("claude", ["--input-format", "stream-json"], { cwd: "/g/untrusted-start" });
+  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, () => {});
+  assert.strictEqual(session.stdin.lines.length, 1);
+  assert.deepStrictEqual(spare.stdin.lines, []);
+  session.exitCode = 0;
+  const results = [];
+  control.sendSetCwd({ requestId: "b", path: "/tmp/x" }, (result) => results.push(result));
+  assert.match(results[0].error, /no running CLI/);
+  assert.deepStrictEqual(spare.stdin.lines, []);
+  // Given a conversation, a CLI in untrusted-start is the session's after all.
+  spare.stdin.write('{"type":"user"}\n');
+  control.sendSetCwd({ requestId: "c", path: "/tmp/x" }, () => {});
+  assert.strictEqual(spare.stdin.lines.length, 2);
+});
+
+test("a user line written in pieces still marks the session", () => {
+  const control = freshControl();
+  const session = runningCli(control);
+  const other = runningCli(control);
+  session.stdin.write('{"type":"user","message":{"content":"');
+  session.stdin.write('long"}}\n');
+  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, () => {});
+  assert.strictEqual(session.stdin.lines.length, 3);
+  assert.deepStrictEqual(other.stdin.lines, []);
+});
+
+test("the wrapped write keeps the stream's return value", () => {
+  const control = freshControl();
+  const child = fakeChild();
+  child.stdin.write = function (line) { this.lines.push(line); return false; };
+  runningCli(control, child);
+  assert.strictEqual(child.stdin.write('{"type":"user"}\n'), false);
+});
+
+test("a stdin already ended is not written to", () => {
+  const control = freshControl();
+  const child = runningCli(control);
+  child.stdin.writableEnded = true;
+  const results = [];
+  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, (result) => results.push(result));
+  assert.match(results[0].error, /no running CLI/);
+  assert.deepStrictEqual(child.stdin.lines, []);
+});
+
+test("falls back to the newest running CLI once the session's has exited", () => {
+  const control = freshControl();
+  const first = runningCli(control);
+  const second = runningCli(control);
+  first.stdin.write('{"type":"user"}\n');
+  first.exitCode = 0;
+  control.sendSetCwd({ requestId: "a", path: "/tmp/x" }, () => {});
+  assert.strictEqual(second.stdin.lines.length, 1);
+});
