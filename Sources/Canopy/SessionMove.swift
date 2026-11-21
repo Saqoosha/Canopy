@@ -577,15 +577,23 @@ enum SessionMove {
     /// daemon (`ShimProcess.askCarriedMoveAgain`). Without it an update restart dropped a move
     /// that was waiting on background tasks, and nobody was told (2026-11-21).
     struct CarriedMoves: Codable, Equatable {
-        /// Resume id, lowercased, to the folder asked for.
-        var paths: [String: String]
-        var savedAt: Date
+        /// `key(_:)` of the resume id, to the folder asked for.
+        private(set) var paths: [String: String]
+        let savedAt: Date
 
-        /// The held sessions' window: an older file is from a restart whose daemon never came up.
+        /// The held sessions' window. It also bounds the wait for the session to start again,
+        /// so a session reopened hours later does not move on an old request.
         static let maxAge = DaemonHeldSessions.maxAge
 
-        /// Filled at daemon start, emptied as each session's CLI starts.
-        @MainActor static var waiting: [String: String] = [:]
+        /// What this daemon read at start; `take` hands each entry out once.
+        @MainActor private static var loaded: CarriedMoves?
+
+        init(paths: [String: String], savedAt: Date) {
+            self.paths = Dictionary(paths.map { (Self.key($0.key), $0.value) }, uniquingKeysWith: { _, last in last })
+            self.savedAt = savedAt
+        }
+
+        static func key(_ resumeId: String) -> String { resumeId.lowercased() }
 
         /// `pathOf` is a parameter so the probe needs no running shim.
         static func capture(_ sessions: [OpenSession], now: Date = Date(),
@@ -593,9 +601,22 @@ enum SessionMove {
             var paths: [String: String] = [:]
             for session in sessions {
                 guard case .local = session.origin, let path = pathOf(session) else { continue }
-                paths[session.resumeId.lowercased()] = path
+                paths[session.resumeId] = path
             }
             return CarriedMoves(paths: paths, savedAt: now)
+        }
+
+        @MainActor static func load(_ carried: CarriedMoves?) { loaded = carried }
+
+        /// The folder a session's move was waiting for, once, and only within `maxAge` of the restart.
+        @MainActor static func take(resumeId: String?, now: Date = Date()) -> String? {
+            guard let resumeId, let carried = loaded,
+                  let path = loaded?.paths.removeValue(forKey: key(resumeId)) else { return nil }
+            guard now.timeIntervalSince(carried.savedAt) <= maxAge else {
+                logger.notice("dropped a waiting move: its session started \(Int(now.timeIntervalSince(carried.savedAt)), privacy: .public)s after the restart")
+                return nil
+            }
+            return path
         }
 
         static var fileURL: URL {
@@ -617,12 +638,15 @@ enum SessionMove {
         static func consume(from url: URL = fileURL, now: Date = Date()) -> CarriedMoves? {
             guard let data = try? Data(contentsOf: url) else { return nil }
             try? FileManager.default.removeItem(at: url)
-            guard let carried = try? JSONDecoder().decode(CarriedMoves.self, from: data) else {
-                logger.error("waiting moves file unreadable")
+            let carried: CarriedMoves
+            do {
+                carried = try JSONDecoder().decode(CarriedMoves.self, from: data)
+            } catch {
+                logger.error("waiting moves file unreadable: \(error.localizedDescription, privacy: .public)")
                 return nil
             }
             guard now.timeIntervalSince(carried.savedAt) <= maxAge else {
-                logger.notice("dropped \(carried.paths.count, privacy: .public) waiting move(s) from an old restart")
+                logger.notice("dropped \(carried.paths.count, privacy: .public) waiting move(s) saved \(Int(now.timeIntervalSince(carried.savedAt)), privacy: .public)s ago")
                 return nil
             }
             return carried

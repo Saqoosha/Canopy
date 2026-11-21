@@ -2610,6 +2610,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// The trust question `pendingMove` is waiting on, and the host alert to take down when a viewer answers first.
     private var moveTrust: (moveId: String, race: SessionMove.TrustRace<ObjectIdentifier>,
                             hostAlert: SessionMove.HostTrustAlert?)?
+    /// A move the previous daemon was still waiting on, until the CLI's `init` asks for it again.
+    private var carriedMovePath: String?
 
     @MainActor
     init(workingDirectory: URL, resumeSessionId: String? = nil, model: String? = nil, effortLevel: String? = nil, permissionMode: PermissionMode = .acceptEdits, sessionTitle: String? = nil, statusBarData: StatusBarData? = nil, remoteHost: String? = nil, customApi: ModelProvider? = nil, claudeAccount: ClaudeAccount? = nil, resumeIdIsExistingTranscript: Bool) {
@@ -2623,6 +2625,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         self.sessionTitle = sessionTitle ?? ""
         self.statusBarData = statusBarData
         self.remoteHost = remoteHost
+        if remoteHost == nil { carriedMovePath = SessionMove.CarriedMoves.take(resumeId: resumeSessionId) }
         self.customApi = customApi
         if let resumeSessionId,
            let savedTitle = SessionTitleStore.title(forSessionId: resumeSessionId),
@@ -4430,13 +4433,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// another move is under way: replacing it could drop one the CLI has made.
     func requestMove(to path: String) -> Bool {
         if pendingMove?.isUnderWay == true { return false }
+        // A newer request replaces one carried across a restart.
+        carriedMovePath = nil
         pendingMove = SessionMove.Latch(path: path)
         moveWhenQuiet()
         return true
     }
 
     /// The folder of a move not finished yet, for the daemon to carry across a restart.
-    var pendingMovePath: String? { pendingMove?.path }
+    var pendingMovePath: String? { pendingMove?.path ?? carriedMovePath }
 
     /// Background commands and Monitors the CLI still runs; a move waits for every one to end.
     var backgroundTaskCount: Int { pendingBackgroundTaskIds.count }
@@ -4444,8 +4449,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// A move the previous daemon was still waiting on (`SessionMove.CarriedMoves`). Asked at the
     /// CLI's `init`, since `set_cwd` needs a running CLI; it then waits for that turn to end.
     private func askCarriedMoveAgain() {
-        guard remoteHost == nil, pendingMove == nil, let id = resumeSessionId?.lowercased(),
-              let path = SessionMove.CarriedMoves.waiting.removeValue(forKey: id) else { return }
+        guard let path = carriedMovePath else { return }
+        carriedMovePath = nil
+        guard pendingMove == nil else { return }
         logger.notice("[move] asking again for a move the restart interrupted")
         _ = requestMove(to: path)
     }
@@ -4884,6 +4890,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             trackPermissionState(stdoutMessage: msg)
             // A pane-less session's only id report once it has run a turn; no webview sends one.
             if activeSessionId == nil, let sid = Self.sessionIdFromInit(frame) { adoptReportedSessionId(sid) }
+            if Self.sessionIdFromInit(frame) != nil { askCarriedMoveAgain() }
             extractStatusData(innerMessage)
             extractTitle(innerMessage)
             extractRawUsage(innerMessage)
@@ -8398,7 +8405,6 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // is one of the types the extension forwards verbatim as
             // io_message, see the Protocol notes in CLAUDE.md) plus the
             // captures on `mainModelUsage`.
-            if ioMsg["subtype"] as? String == "init" { askCarriedMoveAgain() }
             if ioMsg["subtype"] as? String == "init",
                let model = ioMsg["model"] as? String, !model.isEmpty
             {
