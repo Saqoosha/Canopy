@@ -13,8 +13,15 @@
             <sparkle:shortVersionString>3.31.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[### Changes
-- (Add release notes here)
+            <description sparkle:format="markdown"><![CDATA[### Features
+- Mirror panes (sessions running on another paired Mac) now show the session's peer name and long-job progress in the sidebar, with the home Mac's name ahead of the project. Peer names need the other Mac on this version too; job progress needs only the viewing Mac.
+
+### Bug Fixes
+- Sidebar titles no longer show Claude Code's own generated titles, which picked up the persona from your CLAUDE.md or output style (e.g. "…すごい！すごい！質問？"). Untitled sessions show the first prompt you typed instead.
+- Canopy's generated titles were being dropped for many new sessions once the title store was full; the oldest titles are now dropped first.
+- Moving a session to another folder failed with "no running CLI" while the session was alive.
+- A session move that was waiting on background tasks was lost when the daemon restarted; it now carries over the restart.
+- Closing a pane no longer drops its running long job, and a job's progress probe that keeps running after closing its output no longer freezes the job.
 ]]></description>
             <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.31.0/Canopy-3.31.0.dmg" length="6862846" type="application/octet-stream" sparkle:edSignature="xI49lpUnfCz30z0MrlWiWjquvj/XN4V2sj2/pUt0FgPKIfbHQlsSEpzEXui56CozrsrzwAV0YQ0R44cKaufvAQ=="/>
             <sparkle:deltas>
