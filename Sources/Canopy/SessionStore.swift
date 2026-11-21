@@ -1827,6 +1827,7 @@ final class SessionStore {
             session.isWaiting = activity == .background
             if row.attentionLine != session.attentionLine { session.attentionLine = row.attentionLine }
             if row.backgroundTasks != session.backgroundTaskCount { session.backgroundTaskCount = row.backgroundTasks }
+            if row.job != session.job { session.job = row.job }
             session.applyDaemonActivitySince(row.stateSince)
             if !row.model.isEmpty { session.statusBar.model = row.model }
             if let mode = PermissionMode(rawValue: row.permissionMode), mode != session.permissionMode {
@@ -1860,6 +1861,7 @@ final class SessionStore {
             if key != nil {
                 session.attentionLine = row.attentionLine
                 session.backgroundTaskCount = row.backgroundTasks
+                session.job = row.job
                 session.applyDaemonActivitySince(row.stateSince)
             }
             openSessions.append(session)
@@ -1885,6 +1887,7 @@ final class SessionStore {
             session.isWaiting = false
             session.backgroundTaskCount = 0
             session.attentionLine = nil
+            session.job = nil
             session.daemonActivitySince = nil
         }
         for row in plan.stoppedAdds where !row.cwd.isEmpty && !openSessions.contains(where: { $0.resumeId == row.resumeId }) {

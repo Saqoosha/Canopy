@@ -6,6 +6,39 @@ import Foundation
 enum JobLogicProbe {
     static func run(_ record: (String, Bool, String) -> Void) {
         estimator(record)
+        wire(record)
+    }
+
+    private static func wire(_ record: (String, Bool, String) -> Void) {
+        let job = JobSnapshot(label: "IG LOD", done: 328, total: 793, etaAt: Date(timeIntervalSince1970: 1_003_300),
+                              state: .running, stalledSince: nil, note: "ssh の認証に失敗")
+        func row(_ job: JobSnapshot?) -> ControlProtocol.SessionRow {
+            ControlProtocol.SessionRow(key: "k", resumeId: "r", title: "t", project: "p", cwd: "/", state: "background",
+                                       running: true, clients: 0, lastActiveAt: 0, model: "", messageCount: 0,
+                                       permissionMode: "default", accountId: nil, job: job)
+        }
+        let back = ControlProtocol.SessionRow(wire: row(job).wire)
+        record("job wire: SessionRow round-trips job", back?.job == job, "\(String(describing: back?.job))")
+        let jobWire = row(job).wire["job"] as? [String: Any]
+        record("job wire: etaAt is unix seconds", jobWire?["etaAt"] as? Int == 1_003_300, "\(String(describing: jobWire))")
+        record("job wire: an absent job leaves no key", row(nil).wire["job"] == nil, "")
+        let stalled = JobSnapshot(label: "h7", done: 680, total: 1077, etaAt: nil, state: .stalled,
+                                  stalledSince: Date(timeIntervalSince1970: 1_000_600))
+        record("job wire: a stalled job round-trips", ControlProtocol.SessionRow(wire: row(stalled).wire)?.job == stalled, "")
+
+        let pane = RosterSnapshot.Pane(sessionId: "s", resumeId: "r", paneIndex: 0, title: "t", project: "p",
+                                       state: "background", stateSince: 1, contextPct: 0, model: "", messageCount: 0,
+                                       live: true, attentionLine: "Bash: make", job: job)
+        let encoded = (try? JSONEncoder().encode(pane)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let paneJob = encoded?["job"] as? [String: Any]
+        record("roster: pane encodes job and attentionLine with etaAt as Int seconds",
+               paneJob?["etaAt"] as? Int == 1_003_300 && paneJob?["state"] as? String == "running"
+                   && encoded?["attentionLine"] as? String == "Bash: make", "\(String(describing: encoded))")
+        let decoded = (try? JSONEncoder().encode(pane)).flatMap { try? JSONDecoder().decode(RosterSnapshot.Pane.self, from: $0) }
+        record("roster: pane round-trips job", decoded?.job == job && decoded?.attentionLine == "Bash: make", "")
+        let old = #"{"sessionId":"s","paneIndex":0,"title":"t","project":"p","state":"idle","stateSince":1,"contextPct":0,"model":"","messageCount":0}"#
+        let oldPane = try? JSONDecoder().decode(RosterSnapshot.Pane.self, from: Data(old.utf8))
+        record("roster: old pane JSON without the keys decodes", oldPane != nil && oldPane?.job == nil && oldPane?.attentionLine == nil, "")
     }
 
     private static func estimator(_ record: (String, Bool, String) -> Void) {

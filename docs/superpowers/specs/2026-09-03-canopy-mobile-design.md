@@ -71,6 +71,8 @@ Per pane:
 
 Per account: quota (5-hour and weekly) from `SharedRateLimitData.shared` — exists. `SharedRateLimitData`'s own doc comment says rate limits are per-account, not per-session, so two Macs signed into the same account report identical figures. The phone renders it once, above the machine list, taken from whichever loaded snapshot has the newest `publishedAt`, rather than repeating it under each machine's header where a staler Mac's copy could disagree with a fresher one.
 
+**Superseded 2026-11-21:** the roster now carries `attentionLine`, one line of what a session last asked for or said, so the phone matches the sidebar (`docs/superpowers/specs/2026-11-21-job-eta-gauge-design.md`). The original v1 decision follows.
+
 **The roster carries no conversation content.** "What it is doing right now" was considered at three levels — tool name only, tool name plus target, last assistant message — and cut to nothing for v1. The six reachable states already separate *generating* from *waiting on a background task* from *waiting on a human*, and `StatusBarData.subagents` already says how many subagents are running. A current-tool tracker is a documented extension point, in the shape `SubagentTracker` already uses to build rows from the io_message stream; it is not v1.
 
 The notification path is a separate matter and does carry content: a permission request's text already crosses the network today through Pager's `/request`, and the hook stand-down below moves that same text from the hook to Canopy. Same content, different sender — not new exposure, but the roster's guarantee does not extend to notifications.

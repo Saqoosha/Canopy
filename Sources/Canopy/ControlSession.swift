@@ -870,7 +870,8 @@ final class ControlSession {
                 permissionMode: session.permissionMode.rawValue, accountId: session.claudeAccount?.id,
                 moveCount: session.moveCount, attentionLine: session.attentionLine,
                 backgroundTasks: session.backgroundTaskCount,
-                stateSince: store.activityStamps[session.id]?.since.timeIntervalSince1970)
+                stateSince: store.activityStamps[session.id]?.since.timeIntervalSince1970,
+                job: session.job)
         }
     }
 

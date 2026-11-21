@@ -7,7 +7,7 @@ struct JobSample: Codable, Equatable {
     let total: Int
 }
 
-enum JobState: String, Codable {
+enum JobState: String, Codable, Hashable {
     /// Fewer than two readings with different counts: no rate yet, so no time.
     case measuring
     case running
@@ -19,7 +19,7 @@ enum JobState: String, Codable {
 }
 
 /// What the row and the phone show for a job.
-struct JobSnapshot: Equatable {
+struct JobSnapshot: Hashable {
     let label: String
     let done: Int
     let total: Int
