@@ -339,6 +339,12 @@ final class SessionStore {
         return Self.remoteLiveSections(rosters: remoteRosters, machineIds: remoteMachineIds, attached: attached, now: remoteClock)
     }
 
+    /// The peer name to show for an open session: the local CLI's, or for a
+    /// mirror the one its home Mac publishes (`noteRemoteState`).
+    func peerName(for session: OpenSession) -> String? {
+        PeerNameStore.shared.name(forResumeId: session.resumeId) ?? session.mirrorPeerName
+    }
+
     /// Why an attach cannot even start, or nil when this Mac holds the peer's
     /// address and password.
     func remoteAttachRefusal(machineId: String, machineName: String) -> String? {
@@ -606,6 +612,8 @@ final class SessionStore {
                 session.isThinking = false
                 session.isAsking = false
                 session.isWaiting = false
+                if session.job != nil { session.job = nil }
+                if session.mirrorPeerName != nil { session.mirrorPeerName = nil }
                 continue
             }
             let activity = RosterSnapshot.activity(fromWireState: pane.state)
@@ -613,6 +621,9 @@ final class SessionStore {
             session.isAsking = activity == .asking
             session.isWaiting = activity == .background
             session.statusBar.model = pane.model
+            // The job and peer name live on the Mac that runs the CLI; a mirror has only these.
+            if pane.job != session.job { session.job = pane.job }
+            if pane.peerName != session.mirrorPeerName { session.mirrorPeerName = pane.peerName }
             // A new session started from here carries a placeholder id until
             // the origin's CLI names it; follow the origin so Retry re-attaches.
             if let resumeId = pane.resumeId, resumeId != session.resumeId, pane.sessionId == session.mirrorHostSessionId {

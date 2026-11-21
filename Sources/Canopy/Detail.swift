@@ -103,7 +103,7 @@ struct Detail: View {
                         PaneHeaderStrip(
                             title: session.title.isEmpty ? "Untitled" : session.title,
                             project: session.projectLabel,
-                            peerName: PeerNameStore.shared.name(forResumeId: session.resumeId),
+                            peerName: store.peerName(for: session),
                             slackBound: !store.slackThreads(for: session).isEmpty,
                             showCloseButton: store.paneShowsCloseButton(at: index),
                             leadingChromeAvoidance: index == 0 ? leftPaneHeaderChromeAvoidance : 0,

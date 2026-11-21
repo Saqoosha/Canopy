@@ -588,7 +588,8 @@ final class RosterPublisher {
                 messageCount: 0,
                 live: RosterSnapshot.isLive(session),
                 attentionLine: session.attentionLine,
-                job: session.job))
+                job: session.job,
+                peerName: PeerNameStore.shared.name(forResumeId: session.resumeId)))
         }
         // `OpenSession.ID` is a fresh UUID minted per process and never
         // reused, so without this both dictionaries grow for the life of a

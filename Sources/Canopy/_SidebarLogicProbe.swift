@@ -4167,6 +4167,27 @@ enum SidebarLogicProbe {
             record("attach: a mirror with no origin session id is not matched by an empty one",
                    !unmatched.isThinking && unmatched.resumeId == "other" && unmatched.title == "Keep"
                        && unmatched.project == "P")
+            // A mirror's peer name and job live on its home Mac and reach this one in the roster.
+            let remoteJob = JobSnapshot(label: "train", done: 3, total: 10, etaAt: nil, state: .running, stalledSince: nil)
+            store.noteRemoteState(machineId: "M2", snapshot: RosterSnapshot(
+                machineId: "M2", displayName: "studio", publishedAt: 0, sessionPct: 0, weeklyPct: 0,
+                panes: [RosterSnapshot.Pane(sessionId: "H1", resumeId: "cli-id", paneIndex: 0, title: "Named there", project: "Moved",
+                                            state: "working", stateSince: 0, contextPct: 0, model: "", messageCount: 0, live: true,
+                                            job: remoteJob, peerName: "moved-ab")]))
+            record("mirror row: a mirror shows its home Mac's peer name",
+                   store.peerName(for: started) == "moved-ab", "\(String(describing: store.peerName(for: started)))")
+            record("mirror row: a mirror shows its home Mac's job",
+                   started.job == remoteJob)
+            record("mirror row: a mirror the roster does not list has neither",
+                   store.peerName(for: unmatched) == nil && unmatched.job == nil)
+            let namedPane = RosterSnapshot.Pane(sessionId: "s", resumeId: "r", paneIndex: 0, title: "t", project: "p",
+                                                state: "idle", stateSince: 0, contextPct: 0, model: "", messageCount: 0,
+                                                live: true, peerName: "n-1")
+            let roundTrip = (try? JSONEncoder().encode(namedPane)).flatMap { try? JSONDecoder().decode(RosterSnapshot.Pane.self, from: $0) }
+            record("roster: pane round-trips peerName", roundTrip?.peerName == "n-1")
+            let legacy = #"{"sessionId":"s","paneIndex":0,"title":"t","project":"p","state":"idle","stateSince":0,"contextPct":0,"model":"","messageCount":0}"#
+            record("roster: a pane from an older Mac decodes with no peerName",
+                   (try? JSONDecoder().decode(RosterSnapshot.Pane.self, from: Data(legacy.utf8))).map { $0.peerName == nil } == true)
             record("mirror server: a mac client is not a phone",
                    !MirrorConnection.appliesPhoneReplayRewrites(client: "mac"))
             record("mirror server: a client with no client field is a phone",

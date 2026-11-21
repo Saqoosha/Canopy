@@ -449,6 +449,8 @@ struct Sidebar: View {
             isTeleporting: isTeleporting(row),
             isUnread: isUnread(row),
             activitySince: activitySince(row),
+            peerName: openSession(row).flatMap { store.peerName(for: $0) },
+            mirrorMachine: openSession(row).flatMap { s in s.origin.mirrorTarget.map { s.statusBar.mirrorMachine ?? $0.machineId } },
             onClose: { handleClose(row) }
         )
         // Dimmed, not hidden: the session is still real and its log is still
@@ -713,6 +715,11 @@ struct Sidebar: View {
         return nil
     }
 
+    private func openSession(_ row: SidebarRow) -> OpenSession? {
+        if case .open(let s) = row { return s }
+        return nil
+    }
+
     private func isUnread(_ row: SidebarRow) -> Bool {
         if case .open(let s) = row { return store.unreadSessionIds.contains(s.id) }
         return false
@@ -958,6 +965,10 @@ private struct SidebarRowView: View {
     let isTeleporting: Bool
     let isUnread: Bool
     let activitySince: Date?
+    /// Local or, for a mirror, the home Mac's (`SessionStore.peerName(for:)`).
+    let peerName: String?
+    /// The Mac a mirror pane shows; nil for every other row.
+    let mirrorMachine: String?
     let onClose: () -> Void
 
     var body: some View {
@@ -1001,7 +1012,15 @@ private struct SidebarRowView: View {
                 // reserve the second line's height. `displayProject`, not
                 // `project`: the latter is the filter and grouping key and must
                 // not carry the branch.
-                if !row.displayProject.isEmpty {
+                if let mirrorMachine {
+                    // A mirror's CLI runs on another Mac; say which, ahead of the project.
+                    Text("\(Image(systemName: "display")) \(mirrorMachine) · \(row.displayProject)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(subtitleColor)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help("Mirror of a session running on \(mirrorMachine)")
+                } else if !row.displayProject.isEmpty {
                     Text(row.displayProject)
                         .font(.system(size: 11))
                         .foregroundStyle(subtitleColor)
@@ -1111,13 +1130,6 @@ private struct SidebarRowView: View {
         case .launcher: return .secondary
         case .closedLocal, .closedCloud, .remoteLive: return .secondary
         }
-    }
-
-    /// Nil for every row but `.open`: `PeerNameStore` is keyed by the
-    /// `sessionId` of a *running* CLI, and a closed row has none.
-    private var peerName: String? {
-        guard case .open(let session) = row else { return nil }
-        return PeerNameStore.shared.name(forResumeId: session.resumeId)
     }
 
     private var attentionLine: String? {
