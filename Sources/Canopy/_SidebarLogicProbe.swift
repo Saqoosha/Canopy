@@ -4180,6 +4180,19 @@ enum SidebarLogicProbe {
                    started.job == remoteJob)
             record("mirror row: a mirror the roster does not list has neither",
                    store.peerName(for: unmatched) == nil && unmatched.job == nil)
+            let freshRoster = RosterSnapshot(
+                machineId: "M2", displayName: "studio", publishedAt: Int(Date().timeIntervalSince1970), sessionPct: 0, weeklyPct: 0,
+                panes: [])
+            store.remoteRosters["M2"] = freshRoster
+            store.remoteClock = Date()
+            store.expireMirrorState()
+            record("mirror row: a fresh roster keeps the mirror's job and peer name",
+                   started.job == remoteJob && store.peerName(for: started) == "moved-ab")
+            store.remoteClock = Date().addingTimeInterval(RemoteRosterWatcher.staleThreshold + 1)
+            store.expireMirrorState()
+            record("mirror row: a stale roster drops the mirror's job and peer name",
+                   started.job == nil && store.peerName(for: started) == nil)
+            store.remoteRosters = [:]
             let namedPane = RosterSnapshot.Pane(sessionId: "s", resumeId: "r", paneIndex: 0, title: "t", project: "p",
                                                 state: "idle", stateSince: 0, contextPct: 0, model: "", messageCount: 0,
                                                 live: true, peerName: "n-1")

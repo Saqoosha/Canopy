@@ -450,7 +450,7 @@ struct Sidebar: View {
             isUnread: isUnread(row),
             activitySince: activitySince(row),
             peerName: openSession(row).flatMap { store.peerName(for: $0) },
-            mirrorMachine: openSession(row).flatMap { s in s.origin.mirrorTarget.map { s.statusBar.mirrorMachine ?? $0.machineId } },
+            mirrorMachine: openSession(row).flatMap { store.mirrorMachineName(for: $0) },
             onClose: { handleClose(row) }
         )
         // Dimmed, not hidden: the session is still real and its log is still
@@ -1014,7 +1014,7 @@ private struct SidebarRowView: View {
                 // not carry the branch.
                 if let mirrorMachine {
                     // A mirror's CLI runs on another Mac; say which, ahead of the project.
-                    Text("\(Image(systemName: "display")) \(mirrorMachine) · \(row.displayProject)")
+                    Text("\(Image(systemName: "display")) \(mirrorMachine)\(row.displayProject.isEmpty ? "" : " · \(row.displayProject)")")
                         .font(.system(size: 11))
                         .foregroundStyle(subtitleColor)
                         .lineLimit(1)
