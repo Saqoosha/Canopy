@@ -5255,32 +5255,64 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    private func openTerminal(_ msg: [String: Any]) {
-        let shellPath = msg["shellPath"] as? String
-        let shellArgs = msg["shellArgs"] as? [String] ?? []
-        let cwdPath = workingDirectory.path
-
-        var parts = ["cd", shellQuote(cwdPath)]
-        if let shellPath {
-            parts.append("&&")
-            parts.append(shellQuote(shellPath))
-            for arg in shellArgs {
-                parts.append(shellQuote(arg))
+    /// The shell line Terminal.app runs for an `open_terminal` message.
+    ///
+    /// A `shellCommand` is the line the shim quoted for a `createTerminal`
+    /// that named `shellPath` (auto mode setup); it is run as given. Without
+    /// one, the line is an idle `cd` into the session directory.
+    ///
+    /// Returns nil when `shellCommand` is empty or contains a newline, a
+    /// carriage return or a NUL. The line is interpolated into an AppleScript
+    /// string, and a break there would run a different script. The shim
+    /// refuses those before sending; this is the same check on the wire.
+    static func terminalShellLine(shellCommand: String?, sessionDirectory: String) -> String? {
+        if let shellCommand {
+            if shellCommand.isEmpty
+                || shellCommand.contains("\u{0}")
+                || shellCommand.contains("\n")
+                || shellCommand.contains("\r")
+            {
+                return nil
             }
+            return shellCommand
         }
-        let command = parts.joined(separator: " ")
+        return "cd " + shellQuote(sessionDirectory)
+    }
+
+    /// For local sessions this runs inside `canopyd`: Terminal opens on that
+    /// Mac (given an Automation grant), not on a phone or Mac watching it.
+    private func openTerminal(_ msg: [String: Any]) {
+        guard let command = Self.terminalShellLine(
+            shellCommand: msg["shellCommand"] as? String,
+            sessionDirectory: workingDirectory.path)
+        else {
+            logger.error("open_terminal refused: the shell command was empty or broke across lines")
+            return
+        }
 
         let appleScript = """
         tell application "Terminal"
             activate
-            do script "\(escapeForAppleScript(command))"
+            do script "\(Self.escapeForAppleScript(command))"
         end tell
         """
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         proc.arguments = ["-e", appleScript]
         proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
+        // A missing Automation grant for Terminal makes osascript exit 1 with
+        // -1743 on stderr, and no window opens. Log it, or the click does
+        // nothing and leaves no trace.
+        let stderr = Pipe()
+        proc.standardError = stderr
+        proc.terminationHandler = { process in
+            guard process.terminationStatus != 0 else { return }
+            let data = stderr.fileHandleForReading.readDataToEndOfFile()
+            let message = String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let how = process.terminationReason == .uncaughtSignal ? "killed by signal" : "exited"
+            logger.error("open_terminal: osascript \(how, privacy: .public) \(process.terminationStatus, privacy: .public): \(message, privacy: .public)")
+        }
         do {
             try proc.run()
         } catch {
@@ -5288,11 +5320,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    private func shellQuote(_ s: String) -> String {
+    private static func shellQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    private func escapeForAppleScript(_ s: String) -> String {
+    private static func escapeForAppleScript(_ s: String) -> String {
         s.replacingOccurrences(of: "\\", with: "\\\\")
          .replacingOccurrences(of: "\"", with: "\\\"")
     }
