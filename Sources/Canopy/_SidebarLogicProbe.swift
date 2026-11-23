@@ -16689,11 +16689,8 @@ enum SidebarLogicProbe {
 
         JobLogicProbe.run { record($0, $1, $2) }
 
-        // open_terminal. A shellCommand is the shim's already-quoted line for
-        // createTerminal({shellPath}) — auto mode setup. Dropping it and always
-        // cd'ing the session directory is the bug: Terminal.app opens and the
-        // command never runs. A newline must be refused, because the line is
-        // interpolated into an AppleScript string.
+        // open_terminal: a shellCommand must be run, not replaced by the idle cd
+        // (auto mode setup).
         let setupLine = "cd '/proj' && /usr/bin/env 'DISABLE_AUTOUPDATER=1' '/usr/local/bin/claude' '/auto-mode-setup'"
         record("terminal: a shellCommand is what Terminal.app runs",
                ShimProcess.terminalShellLine(shellCommand: setupLine, sessionDirectory: "/elsewhere") == setupLine,

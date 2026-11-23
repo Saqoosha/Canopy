@@ -5257,31 +5257,14 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// The shell line Terminal.app runs for an `open_terminal` message.
     ///
-    /// A `shellCommand` is the line the shim already quoted for a
-    /// `createTerminal` that named `shellPath`. Claude Code 2.1.330's auto
-    /// mode setup is that call: `claude --permission-mode auto
-    /// --strict-mcp-config --no-chrome /auto-mode-setup`, plus the `cwd` and
-    /// `env` the extension passed (`CLAUDE_CONFIG_DIR`, `DISABLE_AUTOUPDATER`).
-    /// The line is run as given. Rebuilding it here would be a second quoter,
-    /// and the suite that locks the line is the shim's.
-    ///
-    /// A message without one keeps the idle `cd` into the session directory.
-    /// The extension's other `createTerminal` callers pass no `shellPath` and
-    /// then `sendText` the real command, and that `sendText` is still a stub,
-    /// so they must keep opening an idle shell.
+    /// A `shellCommand` is the line the shim quoted for a `createTerminal`
+    /// that named `shellPath` (auto mode setup); it is run as given. Without
+    /// one, the line is an idle `cd` into the session directory.
     ///
     /// Returns nil when `shellCommand` is empty or contains a newline, a
     /// carriage return or a NUL. The line is interpolated into an AppleScript
     /// string, and a break there would run a different script. The shim
     /// refuses those before sending; this is the same check on the wire.
-    ///
-    /// Launched with `/usr/bin/osascript`, not `NSAppleScript`. Every local
-    /// session's shim runs inside `canopyd` (`Canopy --daemon` has no
-    /// `NSApplication`, #279). `osascript` is a separate process and sends
-    /// the Apple Event to Terminal.app in this user's GUI session. A
-    /// LaunchAgent is in that session, so the window opens on the Mac that
-    /// has the binary and the directory. A phone or another Mac that is only
-    /// watching the session does not get the window.
     static func terminalShellLine(shellCommand: String?, sessionDirectory: String) -> String? {
         if let shellCommand {
             if shellCommand.isEmpty
@@ -5296,6 +5279,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return "cd " + shellQuote(sessionDirectory)
     }
 
+    /// For local sessions this runs inside `canopyd`: Terminal opens on that
+    /// Mac (given an Automation grant), not on a phone or Mac watching it.
     private func openTerminal(_ msg: [String: Any]) {
         guard let command = Self.terminalShellLine(
             shellCommand: msg["shellCommand"] as? String,
@@ -5318,27 +5303,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // A missing Automation grant for Terminal makes osascript exit 1 with
         // -1743 on stderr, and no window opens. Log it, or the click does
         // nothing and leaves no trace.
-        //
-        // `proc` is local. The handler has to capture it: otherwise this
-        // function returning releases the Process, and the handler goes with
-        // it, before osascript has exited. The capture is a cycle
-        // (Process → handler → Process); clearing the handler breaks it.
-        //
-        // Close the parent's write end before reading. The child has its own
-        // dup, so this does not cut osascript off, but leaving it open means
-        // `readDataToEndOfFile` never sees EOF. A denied grant would then log
-        // nothing and park the callback.
         let stderr = Pipe()
         proc.standardError = stderr
-        proc.terminationHandler = { [proc] process in
-            let status = process.terminationStatus
-            proc.terminationHandler = nil
-            stderr.fileHandleForWriting.closeFile()
-            guard status != 0 else { return }
+        proc.terminationHandler = { process in
+            guard process.terminationStatus != 0 else { return }
             let data = stderr.fileHandleForReading.readDataToEndOfFile()
             let message = String(decoding: data, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            logger.error("open_terminal: osascript exited \(status, privacy: .public): \(message, privacy: .public)")
+            let how = process.terminationReason == .uncaughtSignal ? "killed by signal" : "exited"
+            logger.error("open_terminal: osascript \(how, privacy: .public) \(process.terminationStatus, privacy: .public): \(message, privacy: .public)")
         }
         do {
             try proc.run()

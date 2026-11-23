@@ -1338,10 +1338,20 @@ describe("window webview bridge", () => {
       { shellPath: "/bin/claude", shellArgs: ["ok", 1], cwd: "/tmp" },
       { shellPath: "/bin/claude", cwd: "/tmp", env: { "BAD-KEY": "1" } },
       { shellPath: "/bin/claude", cwd: "/tmp", env: { OK: "a\nb" } },
+      { shellPath: "/bin/claude", shellArgs: ["\\", ";touch /tmp/pwn;#"], cwd: "/tmp" },
+      { shellPath: "/bin/claude", cwd: "/tmp/evil\\" },
+      { shellPath: "/bin/claude\r", cwd: "/tmp" },
+      { shellPath: "/bin/claude\0", cwd: "/tmp" },
+      { shellPath: "/bin/claude", shellArgs: ["a\nb"], cwd: "/tmp" },
+      { shellPath: "/bin/claude", cwd: "" },
+      { shellPath: "/bin/claude", cwd: "/tmp", env: null },
+      { shellPath: "/bin/claude", cwd: "/tmp", env: [] },
+      { shellPath: "/bin/claude", cwd: "/tmp", env: { X: 1 } },
+      { shellPath: "/bin/claude", cwd: "/tmp", env: { OK: "a\\" } },
       { shellPath: "/bin/claude" },
     ];
     for (const opts of bad) {
-      assert.throws(() => win.createTerminal(opts), (err) => err.code === "CanopyTerminalUnsupported");
+      assert.throws(() => win.createTerminal(opts), (err) => err.code === "CanopyTerminalUnsupported", JSON.stringify(opts));
     }
     assert.equal(stdout.length, 0);
   });
