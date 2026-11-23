@@ -5315,7 +5315,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         proc.arguments = ["-e", appleScript]
         proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
+        // A missing Automation grant for Terminal makes osascript exit 1 with
+        // -1743 on stderr, and no window opens. Log it, or the click does
+        // nothing and leaves no trace.
+        let stderr = Pipe()
+        proc.standardError = stderr
+        proc.terminationHandler = { process in
+            guard process.terminationStatus != 0 else { return }
+            let data = stderr.fileHandleForReading.readDataToEndOfFile()
+            let message = String(decoding: data, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            logger.error("open_terminal: osascript exited \(process.terminationStatus): \(message, privacy: .public)")
+        }
         do {
             try proc.run()
         } catch {
