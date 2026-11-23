@@ -6,6 +6,27 @@
         <description>Most recent changes with links to updates.</description>
         <language>en</language>
         <item>
+            <title>3.31.1</title>
+            <pubDate>Mon, 23 Nov 2026 11:19:00 +0900</pubDate>
+            <link>https://github.com/Saqoosha/Canopy</link>
+            <sparkle:version>238</sparkle:version>
+            <sparkle:shortVersionString>3.31.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[### Bug Fixes
+- Choosing "Set up auto mode" in the bypass-permissions dialog now opens Terminal.app and runs Claude Code's auto mode setup in the session's folder. Before, the option reported success and nothing ran.
+- If Terminal.app cannot be opened (for example, Canopy is not allowed to control Terminal), the failure is now written to the log instead of being dropped.
+]]></description>
+            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.31.1/Canopy-3.31.1.dmg" length="6864588" type="application/octet-stream" sparkle:edSignature="BL4ZWOzhOoBSXYB/fZKnvGglDV6PiMVn82kCoHSzYTg8CDcC0aOHNful6G1LjO9grdjvBOOFtJJ6ZsXlY0ZeCg=="/>
+            <sparkle:deltas>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.31.1/Canopy238-237.delta" sparkle:deltaFrom="237" length="318570" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="8TN2oXmLeI/nA1ypQ3N8yo5P0YeT1sgmOFHZxXPUPokZZbiOgUPYiIB+W165Ust3TVxK7yWXGwVn8H+11YPrDQ=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.31.1/Canopy238-236.delta" sparkle:deltaFrom="236" length="647974" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="N5s3NojZLxL47nG9jOFOqHzTPWVpNg6R4foimnquli19NCXTjeBr29S6PJZB8q301C3lcD6ftnyueHoXreT9Dw=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.31.1/Canopy238-235.delta" sparkle:deltaFrom="235" length="646434" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="sa9J0VKLTfxSL/XZySdxOPw0+cGuiSjhd1isbucfwwmybNr2/P4KL9RFVlLoSAnHPQVcZ1GurWxUJXHK0UG7Bg=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.31.1/Canopy238-234.delta" sparkle:deltaFrom="234" length="830018" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="Y6ASMe5FltrjOmo1hwxUwNS2v//jMxwGFWqZzmwdRIYYlmNNgmRvJoDUdxLPra5WkOfouDO8FQ2xm+YfGu6VDQ=="/>
+                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.31.1/Canopy238-233.delta" sparkle:deltaFrom="233" length="897854" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="o2voKkbzRF1wc7M1kP4VUuLeyu+/gtGBh8oknMtr21STpUS7NmdxyZacL2fS9QEW8wyQiNXpEH9t2xjyzpTyAg=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>3.31.0</title>
             <pubDate>Sat, 21 Nov 2026 22:05:16 +0900</pubDate>
             <link>https://github.com/Saqoosha/Canopy</link>
@@ -50,29 +71,6 @@
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.30.1/Canopy236-233.delta" sparkle:deltaFrom="233" length="813042" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="glPuA2Rfp8aoQG/gCRPonnDtCQXqbi8YCdGvcE+ZZdNfhBw5SRkTeY4EWMoXtrLjacC0IC+I70WdZy2oUbkeAA=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.30.1/Canopy236-232.delta" sparkle:deltaFrom="232" length="867622" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="/N1FRL5PakZ1fK4amnbNNSTkcwAjQCYzlhHEOZBFey76JA9zrp4wt1itAoOgR96BEIwIu/ivRxmtURL55MepAA=="/>
                 <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.30.1/Canopy236-231.delta" sparkle:deltaFrom="231" length="941618" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="XU6CHIXGINtOgj9IjgFXJQG/kD8XzuLmUqFuJWvmHJZKtfwSH0nJiXiS7prvq7SoqWV9ALYhEhtm2FAPU0ZODQ=="/>
-            </sparkle:deltas>
-        </item>
-        <item>
-            <title>3.30.0</title>
-            <pubDate>Sat, 21 Nov 2026 16:22:56 +0900</pubDate>
-            <link>https://github.com/Saqoosha/Canopy</link>
-            <sparkle:version>235</sparkle:version>
-            <sparkle:shortVersionString>3.30.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description sparkle:format="markdown"><![CDATA[### Features
-- Long jobs show their finish time. A session can register a job it started (a training run, a render, a batch) with `canopyctl job watch`; Canopy then checks its progress every few minutes, locally or over ssh, without using the model, and the sidebar row shows a progress ring around the session's dot with the finish time and percent on the right. Hover for the count and the time left.
-- A job that stops making progress turns the row red and moves it to Needs you; a finished job marks the session as unseen. Each sends one push to the phone.
-- The phone's roster now shows the same progress and finish time, and the same one-line summary of what a session is asking or last said.
-- Sessions learn when and how to register a job, and are reminded once after starting a long-running command.
-]]></description>
-            <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.30.0/Canopy-3.30.0.dmg" length="6832973" type="application/octet-stream" sparkle:edSignature="+U4rKWlcnX0RPdDvj4awkmN0//pj0bZjg8GgT2rCtqddD2PAIyodSV+9Z+IASBcW4q0yNfe5QieROYSMFAs+AA=="/>
-            <sparkle:deltas>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.30.0/Canopy235-234.delta" sparkle:deltaFrom="234" length="750382" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="C4Z3F1x0N4zua4SDI/QwuTI+CjH7E+NCPhreGFuqonvpvU4WyTEZTtj06AQjoC+CZpo5XIXj/ONmfRvqTyPZBg=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.30.0/Canopy235-233.delta" sparkle:deltaFrom="233" length="816014" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="i2YkpUw6bF6jJEkaiS+fSF8vqxHZHdmqkP+0ue/XpIEzrWjZc1U3VYKgqUMUPNJJhSFb1g6601Lk0Qmmh/kNBw=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.30.0/Canopy235-232.delta" sparkle:deltaFrom="232" length="868266" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="PJBaW8V9EE4qn1oDQdwvVUo3C/z2k9otpP6wTgFMt69qCjORO2P0PBaJm02XEr1ztsIepHMohYnYSkJXJM8oCw=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.30.0/Canopy235-231.delta" sparkle:deltaFrom="231" length="942130" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="976432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="159LPMuHG+s6tkN8FLCVL4E47/+3bmuGTRK7dzIkf6P11vAim3igP/wJ7s9pBHuCUaZnpcDjWQIIENRSvwK7Bw=="/>
-                <enclosure url="https://github.com/Saqoosha/Canopy/releases/download/v3.30.0/Canopy235-53.delta" sparkle:deltaFrom="53" length="4539122" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="980432" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="bWYyWG+IYIVv0FMkO8QblIWAeeZoUjGQ1dFrE8fRCh5YIakfsDkc3k8UkAel9Sy8I5Csq4cpOAEQ5+MqmNymAQ=="/>
             </sparkle:deltas>
         </item>
         <item>
