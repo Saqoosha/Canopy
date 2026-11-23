@@ -5255,25 +5255,60 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    private func openTerminal(_ msg: [String: Any]) {
-        let shellPath = msg["shellPath"] as? String
-        let shellArgs = msg["shellArgs"] as? [String] ?? []
-        let cwdPath = workingDirectory.path
-
-        var parts = ["cd", shellQuote(cwdPath)]
-        if let shellPath {
-            parts.append("&&")
-            parts.append(shellQuote(shellPath))
-            for arg in shellArgs {
-                parts.append(shellQuote(arg))
+    /// The shell line Terminal.app runs for an `open_terminal` message.
+    ///
+    /// A `shellCommand` is the line the shim already quoted for a
+    /// `createTerminal` that named `shellPath`. Claude Code 2.1.330's auto
+    /// mode setup is that call: `claude --permission-mode auto
+    /// --strict-mcp-config --no-chrome /auto-mode-setup`, plus the `cwd` and
+    /// `env` the extension passed (`CLAUDE_CONFIG_DIR`, `DISABLE_AUTOUPDATER`).
+    /// The line is run as given. Rebuilding it here would be a second quoter,
+    /// and the suite that locks the line is the shim's.
+    ///
+    /// A message without one keeps the idle `cd` into the session directory.
+    /// The extension's other `createTerminal` callers pass no `shellPath` and
+    /// then `sendText` the real command, and that `sendText` is still a stub,
+    /// so they must keep opening an idle shell.
+    ///
+    /// Returns nil when `shellCommand` is empty or contains a newline, a
+    /// carriage return or a NUL. The line is interpolated into an AppleScript
+    /// string, and a break there would run a different script. The shim
+    /// refuses those before sending; this is the same check on the wire.
+    ///
+    /// Launched with `/usr/bin/osascript`, not `NSAppleScript`. Every local
+    /// session's shim runs inside `canopyd` (`Canopy --daemon` has no
+    /// `NSApplication`, #279). `osascript` is a separate process and sends
+    /// the Apple Event to Terminal.app in this user's GUI session. A
+    /// LaunchAgent is in that session, so the window opens on the Mac that
+    /// has the binary and the directory. A phone or another Mac that is only
+    /// watching the session does not get the window.
+    static func terminalShellLine(shellCommand: String?, sessionDirectory: String) -> String? {
+        if let shellCommand {
+            if shellCommand.isEmpty
+                || shellCommand.contains("\u{0}")
+                || shellCommand.contains("\n")
+                || shellCommand.contains("\r")
+            {
+                return nil
             }
+            return shellCommand
         }
-        let command = parts.joined(separator: " ")
+        return "cd " + shellQuote(sessionDirectory)
+    }
+
+    private func openTerminal(_ msg: [String: Any]) {
+        guard let command = Self.terminalShellLine(
+            shellCommand: msg["shellCommand"] as? String,
+            sessionDirectory: workingDirectory.path)
+        else {
+            logger.error("open_terminal refused: the shell command was empty or broke across lines")
+            return
+        }
 
         let appleScript = """
         tell application "Terminal"
             activate
-            do script "\(escapeForAppleScript(command))"
+            do script "\(Self.escapeForAppleScript(command))"
         end tell
         """
         let proc = Process()
@@ -5288,11 +5323,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
     }
 
-    private func shellQuote(_ s: String) -> String {
+    private static func shellQuote(_ s: String) -> String {
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    private func escapeForAppleScript(_ s: String) -> String {
+    private static func escapeForAppleScript(_ s: String) -> String {
         s.replacingOccurrences(of: "\\", with: "\\\\")
          .replacingOccurrences(of: "\"", with: "\\\"")
     }

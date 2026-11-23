@@ -160,6 +160,98 @@ function createOutputRing(maxLines, maxBytes) {
   };
 }
 
+// Claude Code 2.1.330's bypass-permissions dialog calls
+// `createTerminal({ shellPath, shellArgs, cwd, env, hideFromUser: true }).show()`
+// from `openAutoModeSetup`. `shellPath` is the claude binary (or node, when the
+// extension launches the CLI that way) and `shellArgs` ends in `/auto-mode-setup`.
+//
+// The other `createTerminal` callers pass no `shellPath`. They `show()` a
+// terminal and then `sendText` the command, and `sendText` here is still a
+// stub, so those calls must keep writing a name-only `open_terminal`. The host
+// opens an idle `cd` into the session directory and runs nothing else.
+//
+// A `shellPath` terminal is one already-quoted line in `shellCommand`.
+// `ShimProcess.terminalShellLine` runs that line in Terminal.app. Quoting
+// lives here so a value cannot break out of the line, and so the suite can
+// see the exact command. Newlines and NULs are refused: the host interpolates
+// the line into an AppleScript string. `cwd` is required because this process's
+// own cwd is the daemon's, not the session's.
+const SHELL_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function shellQuote(value) {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function breaksShellLine(value) {
+  return /[\0\r\n]/.test(value);
+}
+
+function refuseTerminal(reason) {
+  const err = new Error(`Canopy cannot open this terminal: ${reason}`);
+  err.code = "CanopyTerminalUnsupported";
+  throw err;
+}
+
+function shellCommandForTerminal(opts) {
+  // SSH sessions run the CLI on the remote host. A local Terminal.app would
+  // `cd` to a path that exists only there. `canOpenAutoModeSetup` is false
+  // for those sessions (the binary is behind the process wrapper), so this
+  // is the guard for a caller that asks anyway.
+  if (process.env.CANOPY_SSH_HOST) {
+    refuseTerminal("an SSH remote session has no local terminal for a shellPath command");
+  }
+  const shellPath = opts.shellPath;
+  if (typeof shellPath !== "string" || shellPath.length === 0 || breaksShellLine(shellPath)) {
+    refuseTerminal("shellPath must be a single-line path");
+  }
+  const shellArgs = opts.shellArgs === undefined ? [] : opts.shellArgs;
+  if (!Array.isArray(shellArgs) || shellArgs.some((arg) => typeof arg !== "string" || breaksShellLine(arg))) {
+    refuseTerminal("shellArgs must be single-line strings");
+  }
+  if (typeof opts.cwd !== "string" || opts.cwd.length === 0 || breaksShellLine(opts.cwd)) {
+    refuseTerminal("cwd must be the session directory, as a single-line path");
+  }
+  const env = opts.env === undefined ? {} : opts.env;
+  if (env === null || typeof env !== "object" || Array.isArray(env)) {
+    refuseTerminal("env must be an object of strings");
+  }
+  const unsets = [];
+  const sets = [];
+  const forwarded = {};
+  for (const key of Object.keys(env).sort()) {
+    const value = env[key];
+    if (value === undefined) continue;
+    if (!SHELL_ENV_NAME.test(key)) {
+      refuseTerminal(`env key ${JSON.stringify(key)} is not a shell name`);
+    }
+    if (value === null) {
+      unsets.push(key);
+      forwarded[key] = null;
+      continue;
+    }
+    if (typeof value !== "string" || breaksShellLine(value)) {
+      refuseTerminal(`env ${key} must be a single-line string or null`);
+    }
+    sets.push(shellQuote(`${key}=${value}`));
+    forwarded[key] = value;
+  }
+  const parts = ["cd", shellQuote(opts.cwd), "&&"];
+  if (unsets.length > 0 || sets.length > 0) {
+    parts.push("/usr/bin/env");
+    for (const key of unsets) parts.push("-u", shellQuote(key));
+    parts.push(...sets);
+  }
+  parts.push(shellQuote(shellPath));
+  for (const arg of shellArgs) parts.push(shellQuote(arg));
+  return {
+    shellPath,
+    shellArgs: shellArgs.slice(),
+    cwd: opts.cwd,
+    env: forwarded,
+    shellCommand: parts.join(" "),
+  };
+}
+
 function createWindow() {
   const notifications = createNotificationHandler();
   const providers = new Map(); // viewType → provider
@@ -391,10 +483,27 @@ function createWindow() {
       return base;
     },
 
+    // `hideFromUser` is ignored. The only `shellPath` caller sets it and then
+    // calls `show()` immediately, and Canopy has no terminal panel to keep a
+    // window hidden in: the host opens Terminal.app as this returns.
     createTerminal(opts) {
       const name =
         typeof opts === "string" ? opts : (opts && opts.name) || "Terminal";
-      writeStdout({ type: "open_terminal", name });
+      if (opts && typeof opts === "object" && opts.shellPath !== undefined) {
+        const hosted = shellCommandForTerminal(opts);
+        const msg = {
+          type: "open_terminal",
+          name,
+          shellPath: hosted.shellPath,
+          shellArgs: hosted.shellArgs,
+          cwd: hosted.cwd,
+          shellCommand: hosted.shellCommand,
+        };
+        if (opts.env !== undefined) msg.env = hosted.env;
+        writeStdout(msg);
+      } else {
+        writeStdout({ type: "open_terminal", name });
+      }
       return {
         name,
         processId: Promise.resolve(undefined),

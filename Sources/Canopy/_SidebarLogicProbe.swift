@@ -16689,6 +16689,28 @@ enum SidebarLogicProbe {
 
         JobLogicProbe.run { record($0, $1, $2) }
 
+        // open_terminal. A shellCommand is the shim's already-quoted line for
+        // createTerminal({shellPath}) — auto mode setup. Dropping it and always
+        // cd'ing the session directory is the bug: Terminal.app opens and the
+        // command never runs. A newline must be refused, because the line is
+        // interpolated into an AppleScript string.
+        let setupLine = "cd '/proj' && /usr/bin/env 'DISABLE_AUTOUPDATER=1' '/usr/local/bin/claude' '/auto-mode-setup'"
+        record("terminal: a shellCommand is what Terminal.app runs",
+               ShimProcess.terminalShellLine(shellCommand: setupLine, sessionDirectory: "/elsewhere") == setupLine,
+               ShimProcess.terminalShellLine(shellCommand: setupLine, sessionDirectory: "/elsewhere") ?? "nil")
+        record("terminal: a newline in the shell command is refused",
+               ShimProcess.terminalShellLine(shellCommand: setupLine + "\n", sessionDirectory: "/elsewhere") == nil)
+        record("terminal: a carriage return in the shell command is refused",
+               ShimProcess.terminalShellLine(shellCommand: "cd '/proj'\r", sessionDirectory: "/elsewhere") == nil)
+        record("terminal: a NUL in the shell command is refused",
+               ShimProcess.terminalShellLine(shellCommand: "cd '/proj'\u{0}", sessionDirectory: "/elsewhere") == nil)
+        record("terminal: an empty shell command is refused",
+               ShimProcess.terminalShellLine(shellCommand: "", sessionDirectory: "/elsewhere") == nil)
+        record("terminal: no shell command still cds into the session directory",
+               ShimProcess.terminalShellLine(shellCommand: nil, sessionDirectory: "/Users/me/it's here")
+                   == "cd '/Users/me/it'\\''s here'",
+               ShimProcess.terminalShellLine(shellCommand: nil, sessionDirectory: "/Users/me/it's here") ?? "nil")
+
         // Summary
         lines.append("--- \(pass) passed, \(fail) failed ---")
         return (lines.joined(separator: "\n"), fail)

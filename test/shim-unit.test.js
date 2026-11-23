@@ -1258,10 +1258,128 @@ describe("window webview bridge", () => {
     const term = win.createTerminal({ name: "my-term" });
 
     const parsed = JSON.parse(stdout[stdout.length - 1].replace(/\n$/, ""));
-    assert.equal(parsed.type, "open_terminal");
-    assert.equal(parsed.name, "my-term");
+    assert.deepEqual(parsed, { type: "open_terminal", name: "my-term" });
     assert.equal(term.name, "my-term");
     assert.equal(typeof term.dispose, "function");
+  });
+
+  // Claude Code 2.1.330 openAutoModeSetup. Reverting the shellPath branch in
+  // createTerminal (name-only open_terminal, no shellCommand) fails this.
+  it("createTerminal with shellPath runs that binary, cwd and env", () => {
+    const term = win.createTerminal({
+      name: "Claude Code",
+      iconPath: { fsPath: "/ext/resources/claude-logo.svg" },
+      shellPath: "/usr/local/bin/claude",
+      shellArgs: ["--permission-mode", "auto", "--strict-mcp-config", "--no-chrome", "/auto-mode-setup"],
+      cwd: "/Users/me/proj",
+      isTransient: true,
+      hideFromUser: true,
+      env: {
+        NoDefaultCurrentDirectoryInExePath: "1",
+        DISABLE_AUTOUPDATER: "1",
+        CLAUDE_CODE_AUTOUPDATER_DISABLED_BY_HOST: "1",
+        CLAUDE_CONFIG_DIR: "/Users/me/.claude-accounts/work",
+      },
+    });
+
+    assert.equal(stdout.length, 1);
+    const parsed = JSON.parse(stdout[0].replace(/\n$/, ""));
+    assert.equal(parsed.type, "open_terminal");
+    assert.equal(parsed.name, "Claude Code");
+    assert.equal(parsed.shellPath, "/usr/local/bin/claude");
+    assert.deepEqual(parsed.shellArgs, [
+      "--permission-mode", "auto", "--strict-mcp-config", "--no-chrome", "/auto-mode-setup",
+    ]);
+    assert.equal(parsed.cwd, "/Users/me/proj");
+    assert.equal(parsed.env.CLAUDE_CONFIG_DIR, "/Users/me/.claude-accounts/work");
+    assert.equal(
+      parsed.shellCommand,
+      "cd '/Users/me/proj' && /usr/bin/env" +
+        " 'CLAUDE_CODE_AUTOUPDATER_DISABLED_BY_HOST=1'" +
+        " 'CLAUDE_CONFIG_DIR=/Users/me/.claude-accounts/work'" +
+        " 'DISABLE_AUTOUPDATER=1'" +
+        " 'NoDefaultCurrentDirectoryInExePath=1'" +
+        " '/usr/local/bin/claude'" +
+        " '--permission-mode' 'auto' '--strict-mcp-config' '--no-chrome' '/auto-mode-setup'",
+    );
+    assert.equal(parsed.shellCommand.includes("\n"), false);
+    term.show();
+    assert.equal(stdout.length, 1, "show() must not open a second terminal");
+    assert.equal(term.name, "Claude Code");
+  });
+
+  it("createTerminal quotes shell metacharacters and unsets null env", () => {
+    win.createTerminal({
+      name: "Claude Code",
+      shellPath: "/opt/claude's bin/claude",
+      shellArgs: ["say \"hi\"", "a'b"],
+      cwd: "/Users/me/it's a dir",
+      env: { FOO: "bar'baz", DISABLE_TELEMETRY: null, ZZ: "1" },
+    });
+
+    const parsed = JSON.parse(stdout[0].replace(/\n$/, ""));
+    assert.equal(parsed.env.DISABLE_TELEMETRY, null);
+    assert.equal(
+      parsed.shellCommand,
+      "cd '/Users/me/it'\\''s a dir' && /usr/bin/env" +
+        " -u 'DISABLE_TELEMETRY'" +
+        " 'FOO=bar'\\''baz'" +
+        " 'ZZ=1'" +
+        " '/opt/claude'\\''s bin/claude'" +
+        " 'say \"hi\"' 'a'\\''b'",
+    );
+  });
+
+  it("createTerminal throws and writes nothing for a shellPath it cannot host", () => {
+    const bad = [
+      { shellPath: "/bin/claude\n--flag", cwd: "/tmp" },
+      { shellPath: "", cwd: "/tmp" },
+      { shellPath: "/bin/claude", cwd: "/tmp\n/etc" },
+      { shellPath: "/bin/claude", shellArgs: ["ok", 1], cwd: "/tmp" },
+      { shellPath: "/bin/claude", cwd: "/tmp", env: { "BAD-KEY": "1" } },
+      { shellPath: "/bin/claude", cwd: "/tmp", env: { OK: "a\nb" } },
+      { shellPath: "/bin/claude" },
+    ];
+    for (const opts of bad) {
+      assert.throws(() => win.createTerminal(opts), (err) => err.code === "CanopyTerminalUnsupported");
+    }
+    assert.equal(stdout.length, 0);
+  });
+
+  it("createTerminal without shellPath stays name-only and does not throw", () => {
+    const term = win.createTerminal({
+      name: "Claude Code",
+      cwd: "/tmp/proj",
+      env: { PATH: "/usr/bin", HOME: "/Users/me" },
+      strictEnv: true,
+      isTransient: true,
+      location: { viewColumn: 1 },
+    });
+    term.show();
+    term.sendText("tmux attach");
+
+    assert.equal(stdout.length, 1);
+    const parsed = JSON.parse(stdout[0].replace(/\n$/, ""));
+    assert.deepEqual(parsed, { type: "open_terminal", name: "Claude Code" });
+  });
+
+  it("createTerminal with shellPath refuses an SSH remote session", () => {
+    const prev = process.env.CANOPY_SSH_HOST;
+    process.env.CANOPY_SSH_HOST = "box.local";
+    try {
+      assert.throws(
+        () => win.createTerminal({
+          shellPath: "/usr/bin/claude",
+          shellArgs: ["/auto-mode-setup"],
+          cwd: "/remote/proj",
+        }),
+        (err) => err.code === "CanopyTerminalUnsupported" && /SSH remote/.test(err.message),
+      );
+      assert.equal(stdout.length, 0);
+    } finally {
+      if (prev === undefined) delete process.env.CANOPY_SSH_HOST;
+      else process.env.CANOPY_SSH_HOST = prev;
+    }
   });
 });
 
