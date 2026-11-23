@@ -5318,14 +5318,27 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // A missing Automation grant for Terminal makes osascript exit 1 with
         // -1743 on stderr, and no window opens. Log it, or the click does
         // nothing and leaves no trace.
+        //
+        // `proc` is local. The handler has to capture it: otherwise this
+        // function returning releases the Process, and the handler goes with
+        // it, before osascript has exited. The capture is a cycle
+        // (Process → handler → Process); clearing the handler breaks it.
+        //
+        // Close the parent's write end before reading. The child has its own
+        // dup, so this does not cut osascript off, but leaving it open means
+        // `readDataToEndOfFile` never sees EOF. A denied grant would then log
+        // nothing and park the callback.
         let stderr = Pipe()
         proc.standardError = stderr
-        proc.terminationHandler = { process in
-            guard process.terminationStatus != 0 else { return }
+        proc.terminationHandler = { [proc] process in
+            let status = process.terminationStatus
+            proc.terminationHandler = nil
+            stderr.fileHandleForWriting.closeFile()
+            guard status != 0 else { return }
             let data = stderr.fileHandleForReading.readDataToEndOfFile()
             let message = String(decoding: data, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            logger.error("open_terminal: osascript exited \(process.terminationStatus): \(message, privacy: .public)")
+            logger.error("open_terminal: osascript exited \(status, privacy: .public): \(message, privacy: .public)")
         }
         do {
             try proc.run()
