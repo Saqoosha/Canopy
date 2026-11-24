@@ -258,6 +258,7 @@ function createWindow() {
   const notifications = createNotificationHandler();
   const providers = new Map(); // viewType → provider
   let activeView = null;
+  let lastOutputError = "";
 
   // -------------------------------------------------------------------------
   // Webview bridge
@@ -362,6 +363,10 @@ function createWindow() {
 
     _handleNotificationResponse(requestId, buttonValue) {
       notifications.handleResponse(requestId, buttonValue);
+    },
+
+    _lastOutputError() {
+      return lastOutputError;
     },
 
     _getActiveWebview() {
@@ -483,7 +488,10 @@ function createWindow() {
         base.debug = (...args) => logAt("DEBUG", args);
         base.info = (...args) => logAt("INFO", args);
         base.warn = (...args) => logAt("WARN", args);
-        base.error = (...args) => logAt("ERROR", args);
+        base.error = (...args) => {
+          lastOutputError = args.map(String).join(" ");
+          logAt("ERROR", args);
+        };
       }
 
       return base;

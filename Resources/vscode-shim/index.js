@@ -293,10 +293,12 @@ async function main() {
     // copy is logged at `.error`, which is archived, and `ShimProcess`'s `error`
     // handler has always read a `stack` field that nothing ever sent.
     process.stderr.write(`[vscode-shim] Activation error: ${err.stack}\n`);
+    // The extension replaces the real error and writes it to its output channel.
+    const outputError = window._lastOutputError();
     writeStdout({
       type: "error",
       message: `Extension activation failed: ${err.message}`,
-      stack: err.stack,
+      stack: outputError ? `${err.stack}\nLast output channel error: ${outputError}` : err.stack,
     });
     process.exit(1);
   } finally {
