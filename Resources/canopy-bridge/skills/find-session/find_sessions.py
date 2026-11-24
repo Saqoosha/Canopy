@@ -60,7 +60,7 @@ def projects_root():
 
 
 def saved_titles():
-    """{session id: {"text", "userOwned"}} from Canopy's SessionTitleStore, {} when unreadable."""
+    """{session id: {"text", ...}} from Canopy's SessionTitleStore, {} when unreadable."""
     try:
         with open(os.path.expanduser("~/Library/Preferences/sh.saqoo.Canopy.plist"), "rb") as plist:
             titles = json.loads(plistlib.load(plist)["sessionTitles.v2"])
@@ -292,9 +292,8 @@ def summarize(path, deadline, saved=None):
             summary["lastActive"] = local_date(record.get("timestamp", "")) or summary["lastActive"]
     # `ai-title` is not read: the CLI writes it inside the session, so it carries the user's persona.
     stored = (saved or {}).get(session_id(path).lower(), {})
-    typed_title = stored.get("text") if stored.get("userOwned") else ""
     fallback = (summary["firstPrompt"] or command)[:TITLE_CHARS] or ("Untitled" if finished else "")
-    summary["title"] = typed_title or custom_title or stored.get("text") or fallback
+    summary["title"] = stored.get("text") or custom_title or fallback
     return summary, finished
 
 

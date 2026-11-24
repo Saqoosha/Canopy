@@ -355,20 +355,20 @@ describe("find_sessions.py search", () => {
     assert.equal(local(run(home, ["search", "zebra"])).sessions[0].title, "zebra" + "x".repeat(95));
   });
 
-  test("shows the titles Canopy saved, and the user's own before the automatic ones", () => {
+  test("shows the title Canopy saved, before a custom-title, which the extension writes itself on a fork", () => {
     const home = makeHome();
     const typed = "11111111-1111-4111-8111-111111111111";
     const auto = "22222222-2222-4222-8222-222222222222";
-    const renamed = "33333333-3333-4333-8333-333333333333";
+    const fork = "33333333-3333-4333-8333-333333333333";
     for (const id of [typed, auto]) writeSession(home, "-work-project", id, [user("zebra")]);
-    writeSession(home, "-work-project", renamed, [{ type: "custom-title", customTitle: "Renamed in the CLI" }, user("zebra")]);
+    writeSession(home, "-work-project", fork, [{ type: "custom-title", customTitle: "Persona title (fork)" }, user("zebra")]);
     writeTitles(home, {
       [typed]: { text: "Typed", userOwned: true },
       [auto.toUpperCase()]: { text: "Automatic", userOwned: false },
-      [renamed]: { text: "Also automatic", userOwned: false },
+      [fork]: { text: "Clean title (fork)", userOwned: false },
     });
     const titles = Object.fromEntries(local(run(home, ["search", "zebra"])).sessions.map((s) => [s.sessionId, s.title]));
-    assert.deepEqual(titles, { [typed]: "Typed", [auto]: "Automatic", [renamed]: "Renamed in the CLI" });
+    assert.deepEqual(titles, { [typed]: "Typed", [auto]: "Automatic", [fork]: "Clean title (fork)" });
   });
 
   test("a broken title store does not stop a search", () => {
