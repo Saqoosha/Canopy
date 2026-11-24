@@ -95,6 +95,9 @@ const {
   TabInputTextDiff,
   TabInputWebview,
   FileSystemError,
+  CodeActionKind,
+  CodeActionTriggerKind,
+  CodeAction,
   NotebookCellData,
   NotebookCellKind,
   NotebookEdit,
@@ -344,14 +347,57 @@ describe("FileSystemError", () => {
     assert.ok(err instanceof Error);
     assert.ok(err instanceof FileSystemError);
     assert.match(err.message, /File not found/);
+    assert.equal(err.code, "FileNotFound");
   });
 
   it("has static factory methods", () => {
-    assert.ok(FileSystemError.FileExists("x") instanceof FileSystemError);
-    assert.ok(FileSystemError.FileNotADirectory("x") instanceof FileSystemError);
-    assert.ok(FileSystemError.FileIsADirectory("x") instanceof FileSystemError);
-    assert.ok(FileSystemError.NoPermissions("x") instanceof FileSystemError);
-    assert.ok(FileSystemError.Unavailable("x") instanceof FileSystemError);
+    assert.equal(FileSystemError.FileExists("x").code, "FileExists");
+    assert.equal(FileSystemError.FileNotADirectory("x").code, "FileNotADirectory");
+    assert.equal(FileSystemError.FileIsADirectory("x").code, "FileIsADirectory");
+    assert.equal(FileSystemError.NoPermissions("x").code, "NoPermissions");
+    assert.equal(FileSystemError.Unavailable("x").code, "Unavailable");
+  });
+});
+
+describe("CodeActionKind", () => {
+  it("uses VS Code's hierarchical kind values", () => {
+    assert.equal(CodeActionKind.Empty.value, "");
+    assert.equal(CodeActionKind.QuickFix.value, "quickfix");
+    assert.equal(CodeActionKind.Refactor.value, "refactor");
+    assert.equal(CodeActionKind.RefactorExtract.value, "refactor.extract");
+    assert.equal(CodeActionKind.RefactorInline.value, "refactor.inline");
+    assert.equal(CodeActionKind.RefactorMove.value, "refactor.move");
+    assert.equal(CodeActionKind.RefactorRewrite.value, "refactor.rewrite");
+    assert.equal(CodeActionKind.Source.value, "source");
+    assert.equal(CodeActionKind.SourceOrganizeImports.value, "source.organizeImports");
+    assert.equal(CodeActionKind.SourceFixAll.value, "source.fixAll");
+    assert.equal(CodeActionKind.Notebook.value, "notebook");
+    assert.equal(CodeActionKind.QuickFix.append("extra").value, "quickfix.extra");
+  });
+
+  it("contains and intersects follow the kind hierarchy", () => {
+    assert.equal(CodeActionKind.QuickFix.contains(CodeActionKind.QuickFix), true);
+    assert.equal(CodeActionKind.Refactor.contains(CodeActionKind.RefactorExtract), true);
+    assert.equal(CodeActionKind.RefactorExtract.contains(CodeActionKind.Refactor), false);
+    assert.equal(CodeActionKind.QuickFix.contains(CodeActionKind.Refactor), false);
+    assert.equal(CodeActionKind.QuickFix.intersects(CodeActionKind.QuickFix.append("extra")), true);
+    assert.equal(CodeActionKind.QuickFix.append("extra").intersects(CodeActionKind.QuickFix), true);
+    assert.equal(CodeActionKind.QuickFix.intersects(CodeActionKind.Source), false);
+  });
+});
+
+describe("CodeActionTriggerKind", () => {
+  it("matches VS Code's values", () => {
+    assert.equal(CodeActionTriggerKind.Invoke, 1);
+    assert.equal(CodeActionTriggerKind.Automatic, 2);
+  });
+});
+
+describe("CodeAction", () => {
+  it("stores title and kind", () => {
+    const action = new CodeAction("Fix with Claude Code", CodeActionKind.QuickFix);
+    assert.equal(action.title, "Fix with Claude Code");
+    assert.equal(action.kind, CodeActionKind.QuickFix);
   });
 });
 
@@ -777,6 +823,8 @@ describe("commands", () => {
 // ===========================================================================
 const {
   createWorkspace,
+  fileSystemErrorFromNode,
+  toFileStat,
   SHOW_DOCUMENT_MAX_BYTES,
   SHOW_DOCUMENT_TRUNCATION_NOTE,
 } = require("../Resources/vscode-shim/workspace.js");
@@ -940,6 +988,11 @@ describe("workspace", () => {
     assert.deepEqual(ws.textDocuments, []);
   });
 
+  it("notebookDocuments is empty", () => {
+    assert.deepEqual(ws.notebookDocuments, []);
+    assert.equal(ws.notebookDocuments.length, 0);
+  });
+
   it("workspaceFile is undefined", () => {
     assert.equal(ws.workspaceFile, undefined);
   });
@@ -959,11 +1012,76 @@ describe("workspace", () => {
     assert.equal(typeof d.dispose, "function");
   });
 
-  it("fs.stat wraps node stat", async () => {
+  it("fs.stat returns a FileStat with a FileType bitmask", async () => {
     const testFile = path.join(tmpDir, "stattest.txt");
     fs.writeFileSync(testFile, "data");
     const stat = await ws.fs.stat(Uri.file(testFile));
-    assert.ok(stat.size > 0);
+    assert.equal(stat.type & FileType.File, FileType.File);
+    assert.equal(stat.type & FileType.Directory, 0);
+    assert.equal(stat.size, 4);
+    assert.equal(typeof stat.mtime, "number");
+    assert.equal(typeof stat.ctime, "number");
+  });
+
+  it("fs.stat reports a directory as FileType.Directory", async () => {
+    const dir = path.join(tmpDir, "subdir");
+    fs.mkdirSync(dir);
+    const stat = await ws.fs.stat(Uri.file(dir));
+    assert.equal(stat.type, FileType.Directory);
+    assert.equal(stat.type & FileType.File, 0);
+  });
+
+  it("fs.stat follows a symlink to a file", async () => {
+    const target = path.join(tmpDir, "target.txt");
+    const link = path.join(tmpDir, "link.txt");
+    fs.writeFileSync(target, "x");
+    fs.symlinkSync(target, link);
+    const stat = await ws.fs.stat(Uri.file(link));
+    assert.equal(stat.type & FileType.File, FileType.File);
+    assert.equal(stat.size, 1);
+  });
+
+  it("fs.stat rejects a missing file with FileNotFound", async () => {
+    const missing = Uri.file(path.join(tmpDir, "no-such-file"));
+    await assert.rejects(ws.fs.stat(missing), (err) => {
+      assert.equal(err.code, "FileNotFound");
+      assert.ok(err instanceof FileSystemError);
+      return true;
+    });
+  });
+
+  it("maps node fs errors onto VS Code FileSystemError codes", () => {
+    const uri = Uri.file(path.join(tmpDir, "ignored"));
+    const cases = [
+      ["ENOENT", "FileNotFound"],
+      ["EACCES", "NoPermissions"],
+      ["EPERM", "NoPermissions"],
+      ["EIO", "Unavailable"],
+      ["ETIMEDOUT", "Unavailable"],
+      ["EEXIST", "FileExists"],
+      ["ENOTDIR", "FileNotADirectory"],
+      ["EISDIR", "FileIsADirectory"],
+      ["ENAMETOOLONG", "Unknown"],
+    ];
+    for (const [nodeCode, vscodeCode] of cases) {
+      const err = fileSystemErrorFromNode(Object.assign(new Error(nodeCode), { code: nodeCode }), uri);
+      assert.equal(err.code, vscodeCode, nodeCode);
+      assert.ok(err instanceof FileSystemError);
+    }
+  });
+
+  it("toFileStat keeps the symlink bit when the node stat did not follow", () => {
+    const stat = toFileStat({
+      isFile: () => false,
+      isDirectory: () => false,
+      isSymbolicLink: () => true,
+      ctimeMs: 1,
+      mtimeMs: 2,
+      size: 3,
+    });
+    assert.equal(stat.type, FileType.SymbolicLink);
+    assert.equal(stat.size, 3);
+    assert.equal(stat.mtime, 2);
   });
 
   it("fs.readFile returns Uint8Array", async () => {
@@ -1838,9 +1956,42 @@ describe("assembleVscodeModule", () => {
     // Languages and extensions stubs
     assert.ok(vscode.languages);
     assert.deepEqual(vscode.languages.getDiagnostics(), []);
+    assert.equal(vscode.CodeActionKind, CodeActionKind);
+    assert.equal(vscode.CodeActionKind.QuickFix.value, "quickfix");
+    assert.equal(vscode.CodeActionTriggerKind.Invoke, 1);
     assert.ok(vscode.extensions);
     assert.equal(vscode.extensions.getExtension(), undefined);
     assert.deepEqual(vscode.extensions.all, []);
+  });
+
+  it("registerCodeActionsProvider returns a Disposable and does not invoke the provider", () => {
+    // The expression CC 2.1.331 evaluates synchronously inside activate.
+    // `CodeActionKind` missing throws "reading 'QuickFix'" before the call;
+    // `registerCodeActionsProvider` missing throws "is not a function".
+    const vscode = assembleVscodeModule({ window: {}, workspace: {}, commands: {}, env: {} });
+    let calls = 0;
+    const disposable = vscode.languages.registerCodeActionsProvider("*", {
+      provideCodeActions() { calls += 1; return []; },
+    }, { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] });
+    assert.equal(calls, 0);
+    assert.equal(typeof disposable.dispose, "function");
+    disposable.dispose();
+  });
+
+  it("languages.match scores language selectors and ignores notebook filename patterns", () => {
+    const vscode = assembleVscodeModule({ window: {}, workspace: {}, commands: {}, env: {} });
+    assert.equal(vscode.languages.match("*", { languageId: "javascript" }), 5);
+    assert.equal(vscode.languages.match("javascript", { languageId: "javascript" }), 10);
+    assert.equal(vscode.languages.match("python", { languageId: "javascript" }), 0);
+    assert.equal(vscode.languages.match(["python", "*"], { languageId: "javascript" }), 5);
+    assert.equal(vscode.languages.match({ language: "javascript" }, { languageId: "javascript" }), 10);
+    assert.equal(vscode.languages.match({ language: "*" }, { languageId: "javascript" }), 5);
+    // Notebook filename patterns. Canopy does not host notebooks, so a
+    // pattern that would match this path still scores 0.
+    assert.equal(
+      vscode.languages.match([{ pattern: "**/*.ipynb" }], { uri: Uri.file("/tmp/notebooks/demo.ipynb") }),
+      0,
+    );
   });
 
   it("Proxy warns on unknown API access", () => {

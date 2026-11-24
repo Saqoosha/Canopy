@@ -231,6 +231,78 @@ test("a set_cwd message reaches the CLI, and its answer comes back", async () =>
     }
 });
 
+/**
+ * CC 2.1.331's activate synchronously evaluates
+ * `vscode.CodeActionKind.QuickFix` and calls `languages.registerCodeActionsProvider`
+ * (same function as insertAtMention). A unit test of the class stays green if
+ * `assembleVscodeModule` stops exporting it: the Proxy returns undefined,
+ * `.QuickFix` throws, activate rejects, and every session dies before `ready`.
+ * The provider must not be invoked — Canopy has no diagnostics surface, and
+ * calling it would reach Range methods this shim does not implement.
+ */
+function plantCodeActionExtension(dir) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({
+        name: "code-action-probe", version: "0.0.0", main: "extension.js",
+    }));
+    fs.writeFileSync(path.join(dir, "extension.js"), [
+        "const vscode = require('vscode');",
+        "exports.activate = (context) => {",
+        "  let providerCalls = 0;",
+        "  const provider = vscode.languages.registerCodeActionsProvider('*', {",
+        "    provideCodeActions() { providerCalls += 1; return []; },",
+        "  }, { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] });",
+        "  const command = vscode.commands.registerCommand('_claude-vscode.fixProblem', async () => {});",
+        "  context.subscriptions.push(provider, command);",
+        "  context.workspaceState.update('cc331Probe', {",
+        "    quickFix: vscode.CodeActionKind.QuickFix.value,",
+        "    invoke: vscode.CodeActionTriggerKind.Invoke,",
+        "    notebooks: vscode.workspace.notebookDocuments.length,",
+        "    matchStar: vscode.languages.match('*', { languageId: 'javascript' }),",
+        "    providerCalls,",
+        "    disposable: typeof provider.dispose === 'function' && typeof command.dispose === 'function',",
+        "  });",
+        "};",
+        "",
+    ].join("\n"));
+}
+
+test("index.js survives the CC 2.1.331 quick-fix registration inside activate", () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "canopy-codeaction-cwd-"));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "canopy-codeaction-home-"));
+    const extensionPath = path.join(home, "ext");
+    plantCodeActionExtension(extensionPath);
+    const result = spawnSync(process.execPath, [
+        SHIM,
+        "--extension-path", extensionPath,
+        "--cwd", cwd,
+        "--settings-path", path.join(home, "settings.json"),
+    ], {
+        input: "",
+        encoding: "utf-8",
+        env: { ...process.env, HOME: home },
+        timeout: 30000,
+    });
+    try {
+        if (result.status !== 0 || /Activation error/.test(result.stderr || "")) {
+            assert.fail(`code-action probe failed to activate: status=${result.status} stderr=${result.stderr}`);
+        }
+        const storagePath = path.join(home, "Library", "Application Support", "Canopy");
+        const stateFile = workspaceStateFile(storagePath, cwd);
+        assert.ok(fs.existsSync(stateFile), `no state file at ${stateFile}`);
+        const probe = JSON.parse(fs.readFileSync(stateFile, "utf-8")).cc331Probe;
+        assert.equal(probe.quickFix, "quickfix");
+        assert.equal(probe.invoke, 1);
+        assert.equal(probe.notebooks, 0);
+        assert.equal(probe.matchStar, 5);
+        assert.equal(probe.providerCalls, 0);
+        assert.equal(probe.disposable, true);
+    } finally {
+        fs.rmSync(cwd, { recursive: true, force: true });
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+});
+
 test("index.js leaves telemetry on when the setting is unset, and the change event is subscribable", () => {
     const probe = probeTelemetry();
     assert.equal(probe.isTelemetryEnabled, true);

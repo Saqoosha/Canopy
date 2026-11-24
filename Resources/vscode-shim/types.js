@@ -233,6 +233,8 @@ const TextEditorRevealType = { Default: 0, InCenter: 1, InCenterIfOutsideViewpor
 const TextDocumentChangeReason = { Undo: 1, Redo: 2 };
 const DiagnosticSeverity = { Error: 0, Warning: 1, Information: 2, Hint: 3 };
 const FileType = { Unknown: 0, File: 1, Directory: 2, SymbolicLink: 64 };
+// Invoke = 1, Automatic = 2. CC 2.1.331 compares this inside the quick-fix provider.
+const CodeActionTriggerKind = { Invoke: 1, Automatic: 2 };
 const FileChangeType = { Changed: 1, Created: 2, Deleted: 3 };
 const NotebookCellKind = { Markup: 1, Code: 2 };
 const NotebookEditorRevealType = { Default: 0, InCenter: 1, InCenterIfOutsideViewport: 2, AtTop: 3 };
@@ -262,34 +264,85 @@ class TabInputWebview {
 // ---------------------------------------------------------------------------
 // FileSystemError
 // ---------------------------------------------------------------------------
+// `code` is the string VS Code puts on `err.code` ("FileNotFound", …).
+// CC 2.1.331's .gitignore reader switches on that, not on Node's errno.
 class FileSystemError extends Error {
-  constructor(message) {
+  constructor(message, code = "Unknown") {
     super(message);
     this.name = "FileSystemError";
+    this.code = code;
   }
 
   static FileNotFound(uri) {
-    return new FileSystemError(`File not found: ${uri}`);
+    return new FileSystemError(`File not found: ${uri}`, "FileNotFound");
   }
 
   static FileExists(uri) {
-    return new FileSystemError(`File exists: ${uri}`);
+    return new FileSystemError(`File exists: ${uri}`, "FileExists");
   }
 
   static FileNotADirectory(uri) {
-    return new FileSystemError(`Not a directory: ${uri}`);
+    return new FileSystemError(`Not a directory: ${uri}`, "FileNotADirectory");
   }
 
   static FileIsADirectory(uri) {
-    return new FileSystemError(`Is a directory: ${uri}`);
+    return new FileSystemError(`Is a directory: ${uri}`, "FileIsADirectory");
   }
 
   static NoPermissions(uri) {
-    return new FileSystemError(`No permissions: ${uri}`);
+    return new FileSystemError(`No permissions: ${uri}`, "NoPermissions");
   }
 
   static Unavailable(uri) {
-    return new FileSystemError(`Unavailable: ${uri}`);
+    return new FileSystemError(`Unavailable: ${uri}`, "Unavailable");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CodeActionKind / CodeAction
+// ---------------------------------------------------------------------------
+// Hierarchical kind strings, same shape as VS Code's extHostTypes. CC 2.1.331
+// evaluates `vscode.CodeActionKind.QuickFix` while registering its quick-fix
+// provider, synchronously inside activate (the same function that registers
+// insertAtMention). The value is only stored on the returned action; nothing
+// here calls contains(). A missing export throws, activate rejects, and the
+// shim exits 1 — no session opens.
+class CodeActionKind {
+  static sep = ".";
+
+  constructor(value) {
+    this.value = value;
+  }
+
+  append(parts) {
+    return new CodeActionKind(this.value ? this.value + CodeActionKind.sep + parts : parts);
+  }
+
+  contains(other) {
+    return this.value === other.value || other.value.startsWith(this.value + CodeActionKind.sep);
+  }
+
+  intersects(other) {
+    return this.contains(other) || other.contains(this);
+  }
+}
+
+CodeActionKind.Empty = new CodeActionKind("");
+CodeActionKind.QuickFix = CodeActionKind.Empty.append("quickfix");
+CodeActionKind.Refactor = CodeActionKind.Empty.append("refactor");
+CodeActionKind.RefactorExtract = CodeActionKind.Refactor.append("extract");
+CodeActionKind.RefactorInline = CodeActionKind.Refactor.append("inline");
+CodeActionKind.RefactorMove = CodeActionKind.Refactor.append("move");
+CodeActionKind.RefactorRewrite = CodeActionKind.Refactor.append("rewrite");
+CodeActionKind.Source = CodeActionKind.Empty.append("source");
+CodeActionKind.SourceOrganizeImports = CodeActionKind.Source.append("organizeImports");
+CodeActionKind.SourceFixAll = CodeActionKind.Source.append("fixAll");
+CodeActionKind.Notebook = CodeActionKind.Empty.append("notebook");
+
+class CodeAction {
+  constructor(title, kind) {
+    this.title = title;
+    this.kind = kind;
   }
 }
 
@@ -373,6 +426,9 @@ module.exports = {
   TextEditorRevealType,
   TextDocumentChangeReason,
   DiagnosticSeverity,
+  CodeActionTriggerKind,
+  CodeActionKind,
+  CodeAction,
   FileType,
   FileChangeType,
   NotebookCellKind,

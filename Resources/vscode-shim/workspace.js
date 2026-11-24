@@ -3,7 +3,7 @@
 const fs = require("node:fs");
 const fsPromises = require("node:fs/promises");
 const path = require("node:path");
-const { Uri, Disposable, EventEmitter, RelativePattern } = require("./types.js");
+const { Uri, Disposable, EventEmitter, RelativePattern, FileType, FileSystemError } = require("./types.js");
 
 // ---------------------------------------------------------------------------
 // Glob matching (simple implementation)
@@ -515,6 +515,53 @@ function openTextDocument(uriOrOptions) {
   return Promise.reject(new Error("not implemented"));
 }
 
+// CC 2.1.331 reads `.gitignore` for the @-file menu through `workspace.fs.stat`.
+// It switches on `err.code` (`FileNotFound` → no rules, `NoPermissions` /
+// `Unavailable` → fail the read) and treats `stat.type` as a FileType bitmask.
+// A raw `fs.Stats` has no `.type`, so `type & FileType.File` is 0 and every
+// gitignore is skipped. `fs.stat` follows symlinks: a symlink to a file is a
+// file, which is what that reader wants.
+function toFileStat(nodeStat) {
+  let type = FileType.Unknown;
+  if (nodeStat.isFile()) type = FileType.File;
+  else if (nodeStat.isDirectory()) type = FileType.Directory;
+  else if (nodeStat.isSymbolicLink()) type = FileType.SymbolicLink;
+  return {
+    type,
+    ctime: nodeStat.ctimeMs,
+    mtime: nodeStat.mtimeMs,
+    size: nodeStat.size,
+  };
+}
+
+function fileSystemErrorFromNode(err, uri) {
+  switch (err && err.code) {
+    case "ENOENT":
+      return FileSystemError.FileNotFound(uri);
+    case "EACCES":
+    case "EPERM":
+      return FileSystemError.NoPermissions(uri);
+    case "EEXIST":
+      return FileSystemError.FileExists(uri);
+    case "ENOTDIR":
+      return FileSystemError.FileNotADirectory(uri);
+    case "EISDIR":
+      return FileSystemError.FileIsADirectory(uri);
+    case "EBUSY":
+    case "EIO":
+    case "ENOSPC":
+    case "ETIMEDOUT":
+    case "ENETDOWN":
+    case "ENETUNREACH":
+    case "EHOSTUNREACH":
+    case "ECONNRESET":
+    case "EAGAIN":
+      return FileSystemError.Unavailable(uri);
+    default:
+      return new FileSystemError((err && err.message) || String(err), "Unknown");
+  }
+}
+
 // ---------------------------------------------------------------------------
 // createWorkspace
 // ---------------------------------------------------------------------------
@@ -575,14 +622,21 @@ function createWorkspace({ cwd, settingsPath, extensionPackageJson, canopySettin
     },
 
     textDocuments: [],
+    // CC 2.1.331 reads `.length` in a Python-env heuristic (that call is in
+    // try/catch) and again in `claude-vscode.addCellToChat`. Canopy has no
+    // notebooks, so the list stays empty.
+    notebookDocuments: [],
     workspaceFile: undefined,
     rootPath: cwd,
 
     fs: {
       async stat(uri) {
         const p = uri instanceof Uri ? uri.fsPath : String(uri);
-        const s = await fsPromises.stat(p);
-        return s;
+        try {
+          return toFileStat(await fsPromises.stat(p));
+        } catch (err) {
+          throw fileSystemErrorFromNode(err, uri);
+        }
       },
       async readFile(uri) {
         const p = uri instanceof Uri ? uri.fsPath : String(uri);
@@ -629,6 +683,8 @@ module.exports = {
   createWorkspace,
   loadJson,
   readFileTextDocument,
+  toFileStat,
+  fileSystemErrorFromNode,
   SHOW_DOCUMENT_MAX_BYTES,
   SHOW_DOCUMENT_TRUNCATION_NOTE,
 };
