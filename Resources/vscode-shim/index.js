@@ -287,12 +287,10 @@ async function main() {
     const ext = require(extensionJsPath);
     await ext.activate(context);
   } catch (err) {
-    // The stack goes out on BOTH channels on purpose. The stderr echo is the
-    // readable one but lands at `.info` in `ShimProcess`, i.e. an in-memory ring
+    // The stderr line lands at `.info` in `ShimProcess`, i.e. an in-memory ring
     // buffer measured at anywhere from 37 s to ~5 minutes — reliably gone by the
     // time a user notices sessions will not open and starts looking. The NDJSON
-    // copy is logged at `.error`, which is archived, and `ShimProcess`'s `error`
-    // handler has always read a `stack` field that nothing ever sent.
+    // frame's `stack` is logged at `.error`, which is archived.
     process.stderr.write(`[vscode-shim] Activation error: ${err.stack}\n`);
     writeStdout({
       type: "error",

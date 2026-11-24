@@ -109,7 +109,7 @@ function activationErrorFrame(body) {
             "--settings-path", path.join(home, "settings.json")], {
             input: "", encoding: "utf-8", timeout: 30000, env: { ...process.env, HOME: home },
         });
-        assert.equal(result.status, 1);
+        assert.equal(result.status, 1, result.stderr.slice(-800));
         // Read as Canopy does: a cut frame does not parse.
         return result.stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((m) => m.type === "error");
     } finally {
@@ -120,7 +120,7 @@ function activationErrorFrame(body) {
 test("a replaced activation error is reported as the one the extension logged", () => {
     const frame = activationErrorFrame(
         "out.error('Activation failed: TypeError (<string(58)>)\\n    at B (/x/extension.js:1168:754)\\n    at C (/x/extension.js:1:2)');"
-        + "out.error('something later');"
+        + "out.error('something later'); out.error(new Error('later')); out.error();"
         + "throw replacement();");
     assert.equal(frame.message, "Extension activation failed: TypeError (extension.js:1168:754)");
     assert.match(frame.stack, /^Activation failed: TypeError [^\n]*\n    at B \(\/x\/extension\.js:1168:754\)/);
@@ -128,8 +128,21 @@ test("a replaced activation error is reported as the one the extension logged", 
 
 test("a replaced activation error with a huge log still arrives whole", () => {
     const frame = activationErrorFrame("out.error('Activation failed: ' + 'x'.repeat(3e6)); throw replacement();");
-    assert.ok(frame.message.length < 300, `message is ${frame.message.length} long`);
-    assert.ok(frame.stack.length <= 4096, `stack is ${frame.stack.length} long`);
+    assert.equal(frame.message, `Extension activation failed: ${"x".repeat(160)}`);
+    assert.equal(frame.stack.length, 4096);
+    const prefix = "Activation failed: ";
+    const atCap = activationErrorFrame(`out.error('${prefix}' + 'x'.repeat(${4095 - prefix.length}) + '\u{1F600}'); throw replacement();`);
+    const atTypeCap = activationErrorFrame(`out.error('${prefix}' + 'x'.repeat(159) + '\u{1F600}'); throw replacement();`);
+    // Swift's JSONSerialization rejects a lone surrogate; JSON.parse does not.
+    for (const text of [atCap.stack, atTypeCap.message]) assert.doesNotMatch(text, /[\uD800-\uDFFF]/);
+});
+
+test("a replaced activation error takes its position from the error it names", () => {
+    const frame = activationErrorFrame(
+        "out.error('Activation failed: Error\\nCaused by: TypeError\\n    at X (/x/extension.js:9:9)'); throw replacement();");
+    assert.equal(frame.message, "Extension activation failed: Error");
+    const joined = activationErrorFrame("out.error('Activation failed:', 'RangeError'); throw replacement();");
+    assert.equal(joined.message, "Extension activation failed: RangeError");
 });
 
 test("an activation error the extension did not replace is reported as thrown", () => {
@@ -139,6 +152,8 @@ test("an activation error the extension did not replace is reported as thrown", 
     const unlogged = activationErrorFrame("out.error('harmless'); throw replacement();");
     assert.equal(unlogged.message, "Extension activation failed: fixed sentence");
     assert.equal(unlogged.stack, "fixed sentence");
+    const blank = activationErrorFrame("out.error('Activation failed: '); throw replacement();");
+    assert.equal(blank.message, "Extension activation failed: fixed sentence");
 });
 
 test("CANOPY_CLI_CWD moves only the CLI spawn, not the extension's other children", async () => {

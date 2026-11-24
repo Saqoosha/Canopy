@@ -490,7 +490,7 @@ function createWindow() {
         base.info = (...args) => logAt("INFO", args);
         base.warn = (...args) => logAt("WARN", args);
         base.error = (...args) => {
-          activationLog = activationLogText(args) ?? activationLog;
+          activationLog = activationLogText(args.map(String).join(" ")) ?? activationLog;
           logAt("ERROR", args);
         };
       }
