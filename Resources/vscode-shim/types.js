@@ -232,10 +232,19 @@ const UIKind = { Desktop: 1, Web: 2 };
 const TextEditorRevealType = { Default: 0, InCenter: 1, InCenterIfOutsideViewport: 2, AtTop: 3 };
 const TextDocumentChangeReason = { Undo: 1, Redo: 2 };
 const DiagnosticSeverity = { Error: 0, Warning: 1, Information: 2, Hint: 3 };
+const CodeActionTriggerKind = { Invoke: 1, Automatic: 2 };
 const FileType = { Unknown: 0, File: 1, Directory: 2, SymbolicLink: 64 };
 const FileChangeType = { Changed: 1, Created: 2, Deleted: 3 };
 const NotebookCellKind = { Markup: 1, Code: 2 };
 const NotebookEditorRevealType = { Default: 0, InCenter: 1, InCenterIfOutsideViewport: 2, AtTop: 3 };
+
+class CodeActionKind {
+  constructor(value) {
+    this.value = value;
+  }
+}
+CodeActionKind.Empty = new CodeActionKind("");
+CodeActionKind.QuickFix = new CodeActionKind("quickfix");
 
 // ---------------------------------------------------------------------------
 // Tab types (for instanceof checks)
@@ -373,6 +382,8 @@ module.exports = {
   TextEditorRevealType,
   TextDocumentChangeReason,
   DiagnosticSeverity,
+  CodeActionKind,
+  CodeActionTriggerKind,
   FileType,
   FileChangeType,
   NotebookCellKind,

@@ -274,6 +274,10 @@ function createWindow() {
 
     const webview = {
       postMessage(message) {
+        // Since 2.1.331 a `true` here makes the extension start a new conversation's CLI before
+        // the page's `init`. A `launch_claude` that resumes, or brings its own channel, discards
+        // that CLI and starts another, running SessionStart hooks twice. The page ignores the message.
+        if (message?.type === "frame-probe") return Promise.resolve(false);
         if (!repairer) {
           writeStdout({ type: "webview_message", message });
           return Promise.resolve(true);

@@ -22,6 +22,8 @@ function assembleVscodeModule({ window, workspace, commands, env }) {
     languages: {
       getDiagnostics: () => [],
       onDidChangeDiagnostics: () => new Disposable(() => {}),
+      // No editor here, so a registered provider is never asked for actions.
+      registerCodeActionsProvider: () => new Disposable(() => {}),
     },
     extensions: {
       getExtension: () => undefined,
