@@ -14,6 +14,7 @@ import base64
 import concurrent.futures
 import json
 import os
+import plistlib
 import re
 import shutil
 import socket
@@ -31,7 +32,7 @@ ENTRYPOINT_LINES = 200
 SNIPPET_RADIUS = 80
 MAX_SNIPPETS = 3
 PROMPT_CHARS = 200
-TITLE_CHARS = 100  # as the sidebar's fallback title
+TITLE_CHARS = 100
 TAIL_PROMPT_CHARS = 500
 TAIL_REPLY_CHARS = 2000
 FILE_BATCH = 500
@@ -56,6 +57,17 @@ SAFE_SESSION_ID = re.compile(r"[0-9A-Za-z-]+\Z")
 
 def projects_root():
     return os.path.expanduser("~/.claude/projects")
+
+
+def saved_titles():
+    """{session id: {"text", "userOwned"}} from Canopy's SessionTitleStore, {} when unreadable."""
+    try:
+        with open(os.path.expanduser("~/Library/Preferences/sh.saqoo.Canopy.plist"), "rb") as plist:
+            titles = json.loads(plistlib.load(plist)["sessionTitles.v2"])
+        return {key.lower(): value for key, value in titles.items()
+                if isinstance(value, dict) and isinstance(value.get("text"), str)}
+    except Exception:  # plistlib raises many kinds; a search is still worth answering without titles
+        return {}
 
 
 def settings_path():
@@ -239,10 +251,18 @@ def scan_lines(rg, terms, files, deadline, on_record):
 SUMMARY_KEYS = ("title", "cwd", "firstPrompt", "lastPrompt", "lastActive")
 
 
-def summarize(path, deadline):
+def slash_command(record):
+    """The command a record runs, with its arguments, or ""."""
+    content = (record.get("message") or {}).get("content") if record.get("type") == "user" else None
+    text = "\n".join(text_blocks(content))
+    parts = [re.search(f"<{tag}>(.*?)</{tag}>", text, re.S) for tag in ("command-name", "command-args")]
+    return " ".join(" ".join(part.group(1).split()) for part in parts if part).strip()
+
+
+def summarize(path, deadline, saved=None):
     """(summary, whether the whole file was read). `lastActive` is the date of the last prompt."""
     summary = dict.fromkeys(SUMMARY_KEYS, "")
-    custom_title = ""
+    custom_title = command = ""
     finished = True
     with open(path, "rb") as transcript:
         for raw in transcript:
@@ -263,6 +283,7 @@ def summarize(path, deadline):
                 continue
             spoken = conversation_text(record)
             if not spoken or spoken[0] != "user":
+                command = command or slash_command(record)
                 continue
             prompt = spoken[1][:PROMPT_CHARS].replace("\n", " ")
             summary["firstPrompt"] = summary["firstPrompt"] or prompt
@@ -270,7 +291,10 @@ def summarize(path, deadline):
             summary["cwd"] = record.get("cwd") or summary["cwd"]
             summary["lastActive"] = local_date(record.get("timestamp", "")) or summary["lastActive"]
     # `ai-title` is not read: the CLI writes it inside the session, so it carries the user's persona.
-    summary["title"] = custom_title or summary["firstPrompt"][:TITLE_CHARS]
+    stored = (saved or {}).get(session_id(path).lower(), {})
+    typed_title = stored.get("text") if stored.get("userOwned") else ""
+    fallback = (summary["firstPrompt"] or command)[:TITLE_CHARS] or ("Untitled" if finished else "")
+    summary["title"] = typed_title or custom_title or stored.get("text") or fallback
     return summary, finished
 
 
@@ -341,6 +365,7 @@ def search_here(terms, match_any, exclude, limit, timeout):
     matched.sort(key=lambda path: (sum(hits[path].values()), modified(path)), reverse=True)
 
     sessions = []
+    saved = saved_titles()
     summary_deadline = max(deadline, time.monotonic() + SUMMARY_GRACE_SECONDS)
     for path in matched[:limit]:
         summary = dict.fromkeys(SUMMARY_KEYS, "")
@@ -348,7 +373,7 @@ def search_here(terms, match_any, exclude, limit, timeout):
             finished = False
         else:
             try:
-                summary, read_all = summarize(path, summary_deadline)
+                summary, read_all = summarize(path, summary_deadline, saved)
                 finished = finished and read_all
             except FileNotFoundError:
                 continue  # removed since rg read it, as when a worktree is cleaned up

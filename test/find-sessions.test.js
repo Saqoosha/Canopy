@@ -74,6 +74,15 @@ function ids(result) {
   return local(result).sessions.map((session) => session.sessionId);
 }
 
+// The plist as Canopy writes it: one JSON blob stored as data.
+function writeTitles(home, titles) {
+  const dir = path.join(home, "Library", "Preferences");
+  fs.mkdirSync(dir, { recursive: true });
+  const data = Buffer.from(JSON.stringify(titles)).toString("base64");
+  fs.writeFileSync(path.join(dir, "sh.saqoo.Canopy.plist"),
+    `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>sessionTitles.v2</key><data>${data}</data></dict></plist>`);
+}
+
 function writePeers(home, peers) {
   const dir = path.join(home, "Library", "Application Support", "Canopy");
   fs.mkdirSync(dir, { recursive: true });
@@ -340,10 +349,52 @@ describe("find_sessions.py search", () => {
     assert.deepEqual(ids(run(home, ["search", "zebra"])), []);
   });
 
-  test("titles a session with the first 100 characters of its first prompt, as the sidebar does", () => {
+  test("cuts a title taken from the first prompt to 100 characters", () => {
     const home = makeHome();
     writeSession(home, "-work-project", "aaaa", [user("zebra" + "x".repeat(150))]);
     assert.equal(local(run(home, ["search", "zebra"])).sessions[0].title, "zebra" + "x".repeat(95));
+  });
+
+  test("shows the titles Canopy saved, and the user's own before the automatic ones", () => {
+    const home = makeHome();
+    const typed = "11111111-1111-4111-8111-111111111111";
+    const auto = "22222222-2222-4222-8222-222222222222";
+    const renamed = "33333333-3333-4333-8333-333333333333";
+    for (const id of [typed, auto]) writeSession(home, "-work-project", id, [user("zebra")]);
+    writeSession(home, "-work-project", renamed, [{ type: "custom-title", customTitle: "Renamed in the CLI" }, user("zebra")]);
+    writeTitles(home, {
+      [typed]: { text: "Typed", userOwned: true },
+      [auto.toUpperCase()]: { text: "Automatic", userOwned: false },
+      [renamed]: { text: "Also automatic", userOwned: false },
+    });
+    const titles = Object.fromEntries(local(run(home, ["search", "zebra"])).sessions.map((s) => [s.sessionId, s.title]));
+    assert.deepEqual(titles, { [typed]: "Typed", [auto]: "Automatic", [renamed]: "Renamed in the CLI" });
+  });
+
+  test("a broken title store does not stop a search", () => {
+    const home = makeHome();
+    writeSession(home, "-work-project", "aaaa", [user("zebra")]);
+    for (const stored of [["not a dictionary"], { aaaa: "not a record" }, { aaaa: { text: 5, userOwned: true } }]) {
+      writeTitles(home, stored);
+      assert.equal(local(run(home, ["search", "zebra"])).sessions[0].title, "zebra");
+    }
+    fs.writeFileSync(path.join(home, "Library", "Preferences", "sh.saqoo.Canopy.plist"), "not a plist");
+    assert.equal(local(run(home, ["search", "zebra"])).sessions[0].title, "zebra");
+  });
+
+  test("titles a session with no prompt by its slash command, else Untitled", () => {
+    const home = makeHome();
+    writeSession(home, "-work-project", "aaaa", [
+      user("<command-message>release</command-message>\n<command-name>/release</command-name>\n<command-args>3.31.2</command-args>"),
+      assistant("zebra"),
+    ]);
+    writeSession(home, "-work-project", "bbbb", [
+      user("<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"),
+      assistant("zebra"),
+    ]);
+    writeSession(home, "-work-project", "cccc", [user("<scheduled-task name=\"x\">do it</scheduled-task>"), assistant("zebra")]);
+    const titles = Object.fromEntries(local(run(home, ["search", "zebra"])).sessions.map((s) => [s.sessionId, s.title]));
+    assert.deepEqual(titles, { aaaa: "/release 3.31.2", bbbb: "/clear", cccc: "Untitled" });
   });
 
   test("keeps a title the user set", () => {
@@ -693,7 +744,7 @@ import json, sys
 sys.path.insert(0, ${JSON.stringify(path.dirname(SCRIPT))})
 import find_sessions
 real = find_sessions.summarize
-find_sessions.summarize = lambda path, deadline: (real(path, deadline)[0], False)
+find_sessions.summarize = lambda path, deadline, saved: (real(path, deadline, saved)[0], False)
 row = find_sessions.search_here(["zebra"], False, [], 15, 20)
 print(json.dumps([row["truncated"], len(row["sessions"])]))
 `;
