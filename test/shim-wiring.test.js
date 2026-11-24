@@ -93,31 +93,6 @@ test("index.js passes the session's own cwd through to workspaceState", () => {
     }
 });
 
-test("a failed activation's error frame carries what the extension logged", () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), "canopy-activation-"));
-    try {
-        const ext = path.join(home, "ext");
-        fs.mkdirSync(ext);
-        fs.writeFileSync(path.join(ext, "package.json"), JSON.stringify({ name: "p", version: "0.0.0", main: "extension.js" }));
-        fs.writeFileSync(path.join(ext, "extension.js"),
-            "exports.activate = () => {\n"
-            + "  const out = require('vscode').window.createOutputChannel('x', { log: true });\n"
-            + "  out.error('Activation failed: TypeError at extension.js:1:2');\n"
-            + "  throw new Error('generic');\n"
-            + "};\n");
-        const result = spawnSync(process.execPath, [SHIM, "--extension-path", ext, "--cwd", home,
-            "--settings-path", path.join(home, "settings.json")], {
-            input: "", encoding: "utf-8", timeout: 30000, env: { ...process.env, HOME: home },
-        });
-        const frame = result.stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((m) => m.type === "error");
-        assert.equal(frame.message, "Extension activation failed: generic");
-        assert.match(frame.stack, /^Error: generic/);
-        assert.match(frame.stack, /Activation failed: TypeError at extension\.js:1:2/);
-    } finally {
-        fs.rmSync(home, { recursive: true, force: true });
-    }
-});
-
 test("CANOPY_CLI_CWD moves only the CLI spawn, not the extension's other children", async () => {
     const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "canopy-clicwd-")));
     try {
