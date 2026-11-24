@@ -148,7 +148,7 @@ enum ExtensionCanary {
     }
 
     /// The error frame's `stack` names the extension's file:line, which is what identifies the
-    /// API the shim lacks; the user-facing message does not carry it.
+    /// API the shim lacks.
     private static func logged(_ verdict: Outcome, stdout: String, stderr: String) -> Outcome {
         guard case .failed = verdict else { return verdict }
         // "exited with status 1" alone does not say why; the host's last words usually do.
