@@ -1139,6 +1139,16 @@ describe("window webview bridge", () => {
     assert.deepEqual(parsed.message, { type: "hello", data: 42 });
   });
 
+  it("answers the extension's frame-probe with false, so it starts no CLI ahead of the page", async () => {
+    win.registerWebviewViewProvider("test.view", { resolveWebviewView() {} });
+    win._activateFirstProvider();
+    const webview = win._getActiveWebview();
+    const before = stdout.length;
+    assert.equal(await webview.postMessage({ type: "frame-probe" }), false);
+    assert.equal(stdout.length, before);
+    assert.equal(await webview.postMessage({ type: "hello" }), true);
+  });
+
   it("webview.onDidReceiveMessage fires from _handleWebviewMessage", () => {
     const provider = {
       resolveWebviewView(_view, _ctx, _token) {},
@@ -1811,6 +1821,18 @@ describe("assembleVscodeModule", () => {
       { Production: vscode.ExtensionMode?.Production, Development: vscode.ExtensionMode?.Development, Test: vscode.ExtensionMode?.Test },
       { Production: 1, Development: 2, Test: 3 },
     );
+  });
+
+  it("lets the extension register a Quick Fix provider (2.1.331 does it in activate)", () => {
+    const vscode = assembleVscodeModule({ window: {}, workspace: {}, commands: {}, env: {} });
+    const registration = vscode.languages.registerCodeActionsProvider(
+      "*",
+      { provideCodeActions: () => [] },
+      { providedCodeActionKinds: [vscode.CodeActionKind.QuickFix] },
+    );
+    assert.equal(typeof registration.dispose, "function");
+    assert.equal(vscode.CodeActionKind.QuickFix.value, "quickfix");
+    assert.deepEqual(vscode.CodeActionTriggerKind, { Invoke: 1, Automatic: 2 });
   });
 
   it("contains all expected namespaces", () => {
