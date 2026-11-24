@@ -108,7 +108,7 @@ describe("find_sessions.py search", () => {
     assert.equal(machine.matched, 1);
     const session = machine.sessions[0];
     assert.equal(session.sessionId, "aaaa");
-    assert.equal(session.title, "Contract review");
+    assert.equal(session.title, "please check the document");
     assert.equal(session.cwd, "/work/project");
     assert.equal(session.lastActive, "2026-11-06");
     assert.deepEqual(session.hits, { "契約": 1 });
@@ -338,6 +338,12 @@ describe("find_sessions.py search", () => {
       queued("zebra from a peer", { kind: "peer", from: "uds:/tmp/x" }),
     ]);
     assert.deepEqual(ids(run(home, ["search", "zebra"])), []);
+  });
+
+  test("titles a session with the first 100 characters of its first prompt, as the sidebar does", () => {
+    const home = makeHome();
+    writeSession(home, "-work-project", "aaaa", [user("zebra" + "x".repeat(150))]);
+    assert.equal(local(run(home, ["search", "zebra"])).sessions[0].title, "zebra" + "x".repeat(95));
   });
 
   test("keeps a title the user set", () => {

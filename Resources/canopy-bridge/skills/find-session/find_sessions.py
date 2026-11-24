@@ -31,6 +31,7 @@ ENTRYPOINT_LINES = 200
 SNIPPET_RADIUS = 80
 MAX_SNIPPETS = 3
 PROMPT_CHARS = 200
+TITLE_CHARS = 100  # as the sidebar's fallback title
 TAIL_PROMPT_CHARS = 500
 TAIL_REPLY_CHARS = 2000
 FILE_BATCH = 500
@@ -241,7 +242,7 @@ SUMMARY_KEYS = ("title", "cwd", "firstPrompt", "lastPrompt", "lastActive")
 def summarize(path, deadline):
     """(summary, whether the whole file was read). `lastActive` is the date of the last prompt."""
     summary = dict.fromkeys(SUMMARY_KEYS, "")
-    custom_title = ai_title = ""
+    custom_title = ""
     finished = True
     with open(path, "rb") as transcript:
         for raw in transcript:
@@ -250,7 +251,7 @@ def summarize(path, deadline):
                 break
             if len(raw) > MAX_LINE_BYTES:
                 continue
-            if b'Title"' not in raw and not any(mark in raw for mark in PROMPT_MARKS):
+            if b'"customTitle"' not in raw and not any(mark in raw for mark in PROMPT_MARKS):
                 continue
             try:
                 record = json.loads(raw)
@@ -260,9 +261,6 @@ def summarize(path, deadline):
             if kind == "custom-title":
                 custom_title = record.get("customTitle") or custom_title
                 continue
-            if kind == "ai-title":
-                ai_title = ai_title or record.get("aiTitle") or ""
-                continue
             spoken = conversation_text(record)
             if not spoken or spoken[0] != "user":
                 continue
@@ -271,7 +269,8 @@ def summarize(path, deadline):
             summary["lastPrompt"] = prompt
             summary["cwd"] = record.get("cwd") or summary["cwd"]
             summary["lastActive"] = local_date(record.get("timestamp", "")) or summary["lastActive"]
-    summary["title"] = custom_title or ai_title or summary["firstPrompt"]
+    # `ai-title` is not read: the CLI writes it inside the session, so it carries the user's persona.
+    summary["title"] = custom_title or summary["firstPrompt"][:TITLE_CHARS]
     return summary, finished
 
 
