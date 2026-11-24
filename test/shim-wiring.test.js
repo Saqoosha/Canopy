@@ -93,6 +93,54 @@ test("index.js passes the session's own cwd through to workspaceState", () => {
     }
 });
 
+/** Run the shim against an extension whose `activate` is `body`; returns its error frame. */
+function activationErrorFrame(body) {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "canopy-activation-"));
+    try {
+        const ext = path.join(home, "ext");
+        fs.mkdirSync(ext);
+        fs.writeFileSync(path.join(ext, "package.json"), JSON.stringify({ name: "p", version: "0.0.0", main: "extension.js" }));
+        fs.writeFileSync(path.join(ext, "extension.js"),
+            "exports.activate = () => {\n"
+            + "  const out = require('vscode').window.createOutputChannel('x', { log: true });\n"
+            + "  const replacement = () => Object.assign(new Error('fixed sentence'), { name: 'CodeExpectedError', stack: 'fixed sentence' });\n"
+            + body + "\n};\n");
+        const result = spawnSync(process.execPath, [SHIM, "--extension-path", ext, "--cwd", home,
+            "--settings-path", path.join(home, "settings.json")], {
+            input: "", encoding: "utf-8", timeout: 30000, env: { ...process.env, HOME: home },
+        });
+        assert.equal(result.status, 1);
+        // Read as Canopy does: a cut frame does not parse.
+        return result.stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((m) => m.type === "error");
+    } finally {
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+}
+
+test("a replaced activation error is reported as the one the extension logged", () => {
+    const frame = activationErrorFrame(
+        "out.error('Activation failed: TypeError (<string(58)>)\\n    at B (/x/extension.js:1168:754)\\n    at C (/x/extension.js:1:2)');"
+        + "out.error('something later');"
+        + "throw replacement();");
+    assert.equal(frame.message, "Extension activation failed: TypeError (extension.js:1168:754)");
+    assert.match(frame.stack, /^Activation failed: TypeError [^\n]*\n    at B \(\/x\/extension\.js:1168:754\)/);
+});
+
+test("a replaced activation error with a huge log still arrives whole", () => {
+    const frame = activationErrorFrame("out.error('Activation failed: ' + 'x'.repeat(3e6)); throw replacement();");
+    assert.ok(frame.message.length < 300, `message is ${frame.message.length} long`);
+    assert.ok(frame.stack.length <= 4096, `stack is ${frame.stack.length} long`);
+});
+
+test("an activation error the extension did not replace is reported as thrown", () => {
+    const thrown = activationErrorFrame("out.error('Activation failed: other'); throw new TypeError('boom');");
+    assert.equal(thrown.message, "Extension activation failed: boom");
+    assert.match(thrown.stack, /^TypeError: boom/);
+    const unlogged = activationErrorFrame("out.error('harmless'); throw replacement();");
+    assert.equal(unlogged.message, "Extension activation failed: fixed sentence");
+    assert.equal(unlogged.stack, "fixed sentence");
+});
+
 test("CANOPY_CLI_CWD moves only the CLI spawn, not the extension's other children", async () => {
     const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "canopy-clicwd-")));
     try {

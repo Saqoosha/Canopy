@@ -9,6 +9,7 @@ const {
 } = require("./types.js");
 const { readFileTextDocument } = require("./workspace.js");
 const { createNotificationHandler } = require("./notifications.js");
+const { activationLogText } = require("./activation-error.js");
 const { createEmphasisRepairer } = require("./cjk-emphasis-stream.js");
 
 // ---------------------------------------------------------------------------
@@ -258,6 +259,7 @@ function createWindow() {
   const notifications = createNotificationHandler();
   const providers = new Map(); // viewType → provider
   let activeView = null;
+  let activationLog;
 
   // -------------------------------------------------------------------------
   // Webview bridge
@@ -362,6 +364,10 @@ function createWindow() {
 
     _handleNotificationResponse(requestId, buttonValue) {
       notifications.handleResponse(requestId, buttonValue);
+    },
+
+    _activationLog() {
+      return activationLog;
     },
 
     _getActiveWebview() {
@@ -483,7 +489,10 @@ function createWindow() {
         base.debug = (...args) => logAt("DEBUG", args);
         base.info = (...args) => logAt("INFO", args);
         base.warn = (...args) => logAt("WARN", args);
-        base.error = (...args) => logAt("ERROR", args);
+        base.error = (...args) => {
+          activationLog = activationLogText(args) ?? activationLog;
+          logAt("ERROR", args);
+        };
       }
 
       return base;

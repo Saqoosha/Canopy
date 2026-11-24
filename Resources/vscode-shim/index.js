@@ -113,6 +113,7 @@ const { createExtensionContext } = require("./context.js");
 const { createCommands } = require("./commands.js");
 const { createWorkspace, loadJson } = require("./workspace.js");
 const { createWindow } = require("./window.js");
+const { describeActivationError } = require("./activation-error.js");
 const { createEnv, isTelemetryEnabledFromConfiguration } = require("./env.js");
 const { assembleVscodeModule } = require("./stubs.js");
 
@@ -295,8 +296,7 @@ async function main() {
     process.stderr.write(`[vscode-shim] Activation error: ${err.stack}\n`);
     writeStdout({
       type: "error",
-      message: `Extension activation failed: ${err.message}`,
-      stack: err.stack,
+      ...describeActivationError(err, window._activationLog()),
     });
     process.exit(1);
   } finally {
