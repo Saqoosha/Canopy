@@ -120,7 +120,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// The phone holds its sessions until Stop; a control-opened one is held only
     /// while a `listen` covers it, so a client that went away does not leave it running.
-    /// An unfinished registered job holds its session too: reaping it would drop the job.
+    /// A job that `JobWatcher.holdsSession` keeps holds its session too.
     nonisolated static func reaperHolds(heldByPhone: Bool, openedByControl: Bool, watched: Bool,
                                         activeJob: Bool) -> Bool {
         heldByPhone || (openedByControl && watched) || activeJob
@@ -286,7 +286,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// mirror. Nil before the primary's first `launch_claude`.
     private var primaryOwnChannel: String?
     /// Whether the extension currently holds the channel in `channelId`.
-    private var liveChannelOpen = false
+    private var liveChannelOpen = false {
+        didSet { if !liveChannelOpen { awaitedStart = nil } }
+    }
     /// The first webview's `init_response`, kept so a later webview's `init` can be
     /// answered here. Forwarding it is fatal: the extension's `init` handler
     /// reads a second init as "the client reloaded" and closes EVERY channel
@@ -1439,6 +1441,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Do not delete this as redundant with `isWorking` — that is exactly
     /// the asynchrony it exists to cover.
     private var phoneReplyInFlight = false
+    /// The text `submitIfIdle` sent and its callback, until this CLI confirms it or is gone.
+    private var awaitedStart: (text: String, onStarted: @MainActor () -> Void)?
+
+    private func confirmAwaitedStart() {
+        let onStarted = awaitedStart?.onStarted
+        awaitedStart = nil
+        onStarted?()
+    }
+
+    /// The CLI's echo of a prompt with exactly `text` in the main conversation.
+    nonisolated static func echoes(_ text: String, _ ioMsg: [String: Any]) -> Bool {
+        guard ioMsg["parent_tool_use_id"] as? String == nil, let message = ioMsg["message"] as? [String: Any] else { return false }
+        let blocks = message["content"] as? [[String: Any]] ?? []
+        let joined = message["content"] as? String
+            ?? blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }.joined(separator: "\n")
+        return joined.trimmingCharacters(in: .whitespacesAndNewlines) == text
+    }
 
     /// Watchdog for a reply injected but never acknowledged by the CLI —
     /// same shape and cancellation discipline as `keepAliveTimeout`, guarding
@@ -1673,7 +1692,20 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return disposition
     }
 
-    /// Injects a reply typed on the phone as a real user turn.
+    /// Injects `text` as a user turn if one can start right now. False changes nothing: the text is
+    /// not queued, so the caller keeps it and tries again. `onStarted` runs once the CLI echoes the text
+    /// or ends a turn; until then a later call is refused, so one CLI never gets the text twice.
+    func submitIfIdle(text: String, onStarted: @escaping @MainActor () -> Void) -> Bool {
+        guard awaitedStart == nil, liveChannelOpen, boundSession?.pendingInitialPrompt == nil,
+              blockingReasonForReply() == nil,
+              Self.phoneReplyMayInjectNow(queueIsEmpty: queuedPhoneReplies.isEmpty,
+                                          gateReason: ineligibilityReasonForReply()) else { return false }
+        guard requestPhoneReply(text: text) else { return false }
+        awaitedStart = (text.trimmingCharacters(in: .whitespacesAndNewlines), onStarted)
+        return true
+    }
+
+    /// Injects a reply typed on the phone, or a job wake, as a real user turn.
     ///
     /// Reuses `requestKeepAlive`'s busy-shim guard — never its swallow
     /// latches. A keep-alive hides itself on purpose; a reply is the
@@ -1683,7 +1715,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// `phoneReplyInFlight` — see that property's doc for why `isWorking`
     /// cannot do this job alone.
     ///
-    /// **Private: `submitPhoneReply` is the only door.** A caller that
+    /// **Private: callers must check the queue first.** A caller that
     /// reached this directly would skip the queue, and skipping the queue
     /// means overtaking prompts the same user typed earlier.
     ///
@@ -1723,10 +1755,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             controlReplyIds.remove(replyId)
         }
         // The same envelope `requestKeepAlive` sends, with the phone's text.
-        // `origin: ["kind": "human"]` is correct and load-bearing here: a
-        // reply IS a human's input, arriving by a different route, and the
-        // CLI records it as one — unlike the keep-alive, this turn is meant
-        // to be visible in the transcript and the replay.
+        // Unlike the keep-alive, this turn is meant to be visible in the transcript and the replay.
         sendToShim([
             "type": "webview_message",
             "message": [
@@ -6863,6 +6892,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // watchdog, which would otherwise fire later against a shim that no
         // longer has anything for it to unlatch.
         endPhoneReplyFlight()
+        awaitedStart = nil
         discardQueuedPhoneReplies()
         controlTurnReplyId = nil
         // The id of an event streamed by the shim that just died. The
@@ -8331,6 +8361,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             isWorking = true
         case "user":
             if let prompt = Self.livePrompt(ioMsg) { turnPrompt = prompt }
+            if let awaited = awaitedStart, Self.echoes(awaited.text, ioMsg) { confirmAwaitedStart() }
             processUserToolResults(ioMsg)
         case "result":
             // Capture before the `isWorking` gate: an immediate API error can
@@ -8360,6 +8391,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // already cleared this the moment `isWorking` flipped true.
             // Also cancels the watchdog so it can't fire later.
             endPhoneReplyFlight()
+            confirmAwaitedStart()
             // If the turn ended without any AskUserQuestion permission
             // request being tracked, the `tool_use`-stream-derived
             // `lastAssistantHadAskUserQuestion` flag is orphaned — e.g. user

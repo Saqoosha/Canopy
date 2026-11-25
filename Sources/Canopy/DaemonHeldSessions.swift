@@ -38,7 +38,7 @@ struct DaemonHeldSessions: Codable, Equatable {
     /// later could run a second CLI on a transcript the app has since resumed itself.
     static let maxAge: TimeInterval = 10 * 60
 
-    /// Held (by the phone or by an unfinished job) or control-opened, local, and resumable. `hasTranscript` is a parameter so the
+    /// Held (by the phone or by a job) or control-opened, local, and resumable. `hasTranscript` is a parameter so the
     /// probe does not touch the disk; a session with no transcript yet cannot be resumed.
     static func capture(_ sessions: [OpenSession], now: Date = Date(),
                         hasTranscript: (OpenSession, URL) -> Bool) -> DaemonHeldSessions {

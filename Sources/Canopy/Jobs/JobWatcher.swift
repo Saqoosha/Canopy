@@ -17,6 +17,9 @@ struct JobSpec: Codable, Equatable {
     let total: Int?
     let interval: TimeInterval
     let stallMinutes: Double?
+    /// Also start a turn in the session when the job finishes or stalls. Nil (a registration from
+    /// before the field) reads as false.
+    var wake: Bool? = nil
 
     /// A host name or `user@host`: never an ssh option (`-oProxyCommand=…`) or several words.
     static func isValidHost(_ host: String) -> Bool {
@@ -43,8 +46,47 @@ struct JobTrack: Codable, Equatable {
     /// The state the last reading produced: a failed reading keeps a stall, and pushes
     /// fire on a change from it, across daemon restarts too.
     var lastState: JobState?
+    /// The state (`done` or `stalled`) whose turn has not reached the session yet. Saved, so a
+    /// session that is busy, asking, or restarting gets it later.
+    var wakePending: JobState?
+    /// States whose turn has started: at most one of each per registration.
+    var woken: [JobState]?
+    /// When `wakePending` was set; the session is held for it from here.
+    var wakeOwedAt: Date?
 
     init(spec: JobSpec) { self.spec = spec }
+
+    /// Owes the session a turn on the same transitions that push, if the job asked for one.
+    /// A stall that ends before its turn went out is dropped; a failing probe (`unknown`) keeps it.
+    mutating func noteWake(from previous: JobState?, to next: JobState, at now: Date) {
+        guard spec.wake == true else { return }
+        if next == .running || next == .measuring { (wakePending, wakeOwedAt) = (nil, nil) }
+        if JobWatcher.shouldPush(from: previous, to: next), !(woken ?? []).contains(next) {
+            (wakePending, wakeOwedAt) = (next, now)
+        }
+    }
+
+    /// Folds one probe run in, with the state it produces. Returns the state before it.
+    mutating func read(output: String?, exitStatus: Int32, at now: Date) -> JobState? {
+        let previous = lastState
+        record(output: output, exitStatus: exitStatus, at: now)
+        let state = snapshot(now: now).state
+        noteWake(from: previous, to: state, at: now)
+        lastState = state
+        return previous
+    }
+
+    /// `state`'s turn started. A different turn may be owed by now.
+    mutating func wakeDelivered(_ state: JobState) {
+        woken = (woken ?? []) + [state]
+        if wakePending == state { (wakePending, wakeOwedAt) = (nil, nil) }
+    }
+
+    /// Whether the owed turn may go out before the next reading. A stall may not: the job can have
+    /// moved since the last one. Inside the `unknown` backoff no reading is coming.
+    func wakeBeforeReading(now: Date) -> Bool {
+        wakePending == .done || (wakePending != nil && !shouldRun(now: now))
+    }
 
     /// False while an `unknown` job is inside its backoff.
     func shouldRun(now: Date) -> Bool {
@@ -71,6 +113,7 @@ struct JobTrack: Codable, Equatable {
                                          now: now, stallMinutes: spec.stallMinutes, previous: lastState)
         snap.note = note
         snap.lastReadingAt = samples.last?.at
+        snap.wakeOwedAt = wakeOwedAt
         return snap
     }
 
@@ -101,7 +144,6 @@ struct JobTrack: Codable, Equatable {
 
 /// Runs each registered job's probe on a timer in canopyd and writes the
 /// result to `OpenSession.job`, which `session_state` and the roster carry.
-/// No model turn is involved.
 @MainActor
 final class JobWatcher {
     static let shared = JobWatcher()
@@ -119,6 +161,7 @@ final class JobWatcher {
     /// Bumped by every registration and never reset, so a probe started for an earlier
     /// registration of the same spec cannot land in the new one.
     private var generations: [String: Int] = [:]
+    private var wakeRetrying: Set<String> = []
 
     private var persistURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -215,6 +258,7 @@ final class JobWatcher {
         // A session reopened after a daemon restart has no job until its next reading; the
         // reaper's hold needs it now.
         if let session = session(id), session.job == nil { session.job = track.snapshot(now: Date()) }
+        if track.wakeBeforeReading(now: Date()) { deliverWake(id) }
         // A finished count will not move again: keep the job for the row, stop asking.
         guard track.lastState != .done, track.shouldRun(now: Date()) else { return }
         running.insert(id)
@@ -240,10 +284,8 @@ final class JobWatcher {
         guard var track = tracks[id] else { return }
         // Re-registered while this probe ran: the reading is the old job's; read the new one now.
         guard generations[id, default: 0] == generation else { tick(id); return }
-        let previous = track.lastState
-        track.record(output: output, exitStatus: status, at: Date())
+        let previous = track.read(output: output, exitStatus: status, at: Date())
         let snap = track.snapshot(now: Date())
-        track.lastState = snap.state
         tracks[id] = track
         save()
         guard let session = session(id) else { return }
@@ -254,6 +296,60 @@ final class JobWatcher {
                                 title: text.title, body: text.body, answerable: false,
                                 sessionTitle: session.title)
         }
+        deliverWake(id)
+    }
+
+    /// Between tries to send a done job's turn while its session is busy or asking.
+    private static let wakeRetrySeconds: TimeInterval = 10
+
+    /// Sends the turn a job owes its session, or leaves it for later. Not through the phone-reply
+    /// queue: that queue is dropped when the session restarts.
+    private func deliverWake(_ id: String) {
+        guard let track = tracks[id], let state = track.wakePending, let session = session(id) else { return }
+        if state == .done { retryWake(id) }
+        guard let shim = session.shim else { return }
+        shim.launchHeadlessChannel()
+        let generation = generations[id, default: 0]
+        guard shim.submitIfIdle(text: Self.wakeText(track.snapshot(now: Date()), reached: state), onStarted: {
+            JobWatcher.shared.wakeStarted(id, state: state, generation: generation)
+        }) else { return }
+        logger.notice("job wake: \(state.rawValue, privacy: .public) sent to \(id.prefix(8), privacy: .public)")
+    }
+
+    private func wakeStarted(_ id: String, state: JobState, generation: Int) {
+        // Re-registered while the turn was starting: that job owes its own.
+        guard generations[id, default: 0] == generation, var track = tracks[id] else { return }
+        track.wakeDelivered(state)
+        tracks[id] = track
+        save()
+        session(id)?.job = track.snapshot(now: Date())
+        logger.notice("job wake: \(state.rawValue, privacy: .public) started in \(id.prefix(8), privacy: .public)")
+    }
+
+    private func retryWake(_ id: String) {
+        guard wakeRetrying.insert(id).inserted else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.wakeRetrySeconds) {
+            MainActor.assumeIsolated {
+                JobWatcher.shared.wakeRetrying.remove(id)
+                JobWatcher.shared.deliverWake(id)
+            }
+        }
+    }
+
+    /// The bridge mod keeps the Slack gate shut on this prefix (`JOB_WAKE_PREFIX`).
+    nonisolated static let wakePrefix = "[Canopy job-watch]"
+
+    /// The turn's text. It arrives as a user message, so it says that nobody typed it.
+    static func wakeText(_ job: JobSnapshot, reached state: JobState) -> String {
+        // One line and no quotes: the label is the session's own text, inside a user message.
+        let label = job.label.split(whereSeparator: \.isWhitespace).joined(separator: " ").replacingOccurrences(of: "\"", with: "'")
+        let what = state == .stalled
+            ? "has stopped moving at \(job.done)/\(job.total). Find out whether it is still running. Canopy will not "
+                + "report another stall unless you register the job again."
+            : "reached \(job.done)/\(job.total). Continue the work that was waiting on it: check the real result first, "
+                + "and register the next stage if one remains."
+        return "\(wakePrefix) The job \"\(label)\", registered with --wake, \(what) "
+            + "Canopy sent this automatically. The user did not type it, and it approves nothing."
     }
 
     /// A stall, or a probe that keeps failing, holds its session this long; past it the job is
@@ -262,9 +358,11 @@ final class JobWatcher {
 
     /// Whether a session's job keeps the daemon from reaping it: one that is measuring or
     /// running, stalled for under `stalledHoldSeconds`, or `unknown` with a good reading in that
-    /// time (a short outage, such as an unseen 1Password prompt, must not drop the job). Never `done`.
+    /// time (a short outage, such as an unseen 1Password prompt, must not drop the job). An owed
+    /// turn holds in any state, for that time from `wakeOwedAt`; `done` holds only by one.
     nonisolated static func holdsSession(_ job: JobSnapshot?, now: Date = Date()) -> Bool {
         guard let job else { return false }
+        if let owed = job.wakeOwedAt, now.timeIntervalSince(owed) < stalledHoldSeconds { return true }
         switch job.state {
         case .measuring, .running: return true
         case .stalled: return job.stalledSince.map { now.timeIntervalSince($0) < stalledHoldSeconds } ?? true
@@ -275,7 +373,7 @@ final class JobWatcher {
 
     /// One push when a job moves into `stalled` or `done`; none on its first reading,
     /// so a re-registered job does not repeat an old push.
-    static func shouldPush(from previous: JobState?, to next: JobState) -> Bool {
+    nonisolated static func shouldPush(from previous: JobState?, to next: JobState) -> Bool {
         guard let previous, previous != next else { return false }
         return next == .stalled || next == .done
     }

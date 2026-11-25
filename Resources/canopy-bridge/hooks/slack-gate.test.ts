@@ -184,6 +184,13 @@ test("Canopy's keep-alive keeps the gate", async ($, on) => {
   expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(true)
 })
 
+test("Canopy's job wake keeps the gate", async ($, on) => {
+  engine(on)
+  await $.prompt.submit({ text: slack })
+  await $.prompt.submit({ text: '[Canopy job-watch] The job "x" reached 10/10.', origin: { kind: 'sdk' } })
+  expect(denied(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toBe(true)
+})
+
 test('a gate armed before a respawn holds in the new CLI, for this session only', async ($, on) => {
   const { store } = engine(on)
   on('session.start', (_, e) => ({ cwd: e.cwd }))

@@ -225,14 +225,16 @@ phone (`docs/superpowers/specs/2026-11-21-job-eta-gauge-design.md`). One job per
 - `job_watch` (local clients only: it runs a shell command on a timer). Params: `key` or
   `sessionId`, `label`, `probe` (a shell command printing `N/M`, or a count when `total` is given),
   and optional `host` (run the probe over ssh there), `total`, `interval` (seconds, default 150,
-  at least 30) and `stallMinutes`. Replaces the session's job. Reply: `{"job": {...}}`, the
-  session row's `job` object.
+  at least 30), `stallMinutes` and `wake` (default false: also start a turn in the session when the
+  job becomes `done` or `stalled`, at most once each per registration, once the session is idle; a
+  closed pane's session is held for it for up to 6 hours). Replaces the session's job. Reply: `{"job": {...}, "wake": true|false}`, with the session
+  row's `job` object. A daemon from before `wake` replies without that key.
 - `job_list`. Params: `key` or `sessionId`. Reply: `{"job": {...}}` or `{"job": null}`.
 - `job_clear` (local clients only). Params: `key` or `sessionId`. Reply: `{"cleared": true|false}`.
 
 canopyd runs the probe at once and then every `interval`, saves registrations in
 `~/Library/Application Support/Canopy/jobs-<bundle id>.json`, and drops a job whose session has not
-been open for 15 minutes. A session whose job is measuring, running, stalled for under 6 hours, or `unknown` within 6 hours of its last count is not reaped when idle and is carried across a daemon restart, so closing its pane does not drop the job; a `done` job holds nothing. Over ssh it uses `SSH_AUTH_SOCK` from `~/.claude/settings.json`'s `env`.
+been open for 15 minutes. A session whose job is measuring, running, stalled for under 6 hours, or `unknown` within 6 hours of its last count is not reaped when idle and is carried across a daemon restart, so closing its pane does not drop the job; a `done` job holds its session only while its `wake` turn is owed, under the same 6 hours. Over ssh it uses `SSH_AUTH_SOCK` from `~/.claude/settings.json`'s `env`.
 
 ### `send_message`
 

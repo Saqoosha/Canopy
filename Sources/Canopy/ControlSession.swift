@@ -788,11 +788,14 @@ final class ControlSession {
         guard interval.isFinite else { return fail(request, "interval must be a number of seconds") }
         let stallMinutes = (p["stallMinutes"] as? NSNumber)?.doubleValue
         if let stallMinutes, !(stallMinutes.isFinite && stallMinutes > 0) { return fail(request, "stallMinutes must be positive") }
+        if p["wake"] != nil, !(p["wake"] is Bool) { return fail(request, "wake must be true or false") }
+        let wake = p["wake"] as? Bool ?? false
         guard let session = requestedSession(request) else { return }
         let spec = JobSpec(resumeId: session.resumeId, label: String(label.prefix(JobSpec.labelLimit)), probe: probe,
                            host: host, total: (p["total"] as? NSNumber)?.intValue,
-                           interval: interval, stallMinutes: stallMinutes)
-        reply(request, ["job": JobWatcher.shared.watch(spec).wire])
+                           interval: interval, stallMinutes: stallMinutes, wake: wake)
+        // `wake` is echoed so a client can tell a daemon that does not know the parameter.
+        reply(request, ["job": JobWatcher.shared.watch(spec).wire, "wake": wake])
     }
 
     private func jobList(_ request: ControlProtocol.Request) {

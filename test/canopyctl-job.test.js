@@ -67,6 +67,14 @@ test("job watch passes --total, --interval and --stall-minutes", async () => {
     { sessionId: "S", label: "L", probe: "P", total: 1077, interval: 60, stallMinutes: 30 });
 });
 
+test("job watch passes --wake only when given", async () => {
+  const d = await fakeDaemon();
+  const r = await run(d.sock, ["job", "watch", "--session-id", "S", "--label", "L", "--probe", "P", "--wake"]);
+  d.close();
+  assert.strictEqual(r.code, 0, r.err);
+  assert.deepStrictEqual(d.requests[0].params, { sessionId: "S", label: "L", probe: "P", interval: 150, wake: true });
+});
+
 test("job list and job clear send their verbs", async () => {
   const d = await fakeDaemon();
   await run(d.sock, ["job", "list", "--session-id", "S"]);
