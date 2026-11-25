@@ -1673,6 +1673,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         return disposition
     }
 
+    /// Injects `text` as a user turn if one can start right now. False changes nothing: the text is
+    /// not queued, so the caller keeps it and tries again.
+    func submitIfIdle(text: String) -> Bool {
+        guard blockingReasonForReply() == nil,
+              Self.phoneReplyMayInjectNow(queueIsEmpty: queuedPhoneReplies.isEmpty,
+                                          gateReason: ineligibilityReasonForReply()) else { return false }
+        return requestPhoneReply(text: text)
+    }
+
     /// Injects a reply typed on the phone as a real user turn.
     ///
     /// Reuses `requestKeepAlive`'s busy-shim guard — never its swallow
@@ -1683,7 +1692,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// `phoneReplyInFlight` — see that property's doc for why `isWorking`
     /// cannot do this job alone.
     ///
-    /// **Private: `submitPhoneReply` is the only door.** A caller that
+    /// **Private: `submitPhoneReply` and `submitIfIdle` are the only doors.** A caller that
     /// reached this directly would skip the queue, and skipping the queue
     /// means overtaking prompts the same user typed earlier.
     ///

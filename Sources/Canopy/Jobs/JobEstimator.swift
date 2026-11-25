@@ -33,6 +33,8 @@ struct JobSnapshot: Hashable {
     /// When the probe last returned a count. Set by `JobTrack`; an `unknown` job holds its
     /// session for a while after it (`JobWatcher.holdsSession`).
     var lastReadingAt: Date? = nil
+    /// A turn the job owes its session (`JobTrack.wakePending`). Local to the daemon: not on either wire.
+    var wakePending = false
 }
 
 /// Turns probe output into a count, and a run of counts into a finish time.

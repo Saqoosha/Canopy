@@ -1,6 +1,6 @@
 ---
 name: job-watch
-description: Register a long-running job (training, rendering, encoding, batch processing; anything over about 10 minutes) so Canopy shows its finish time on the sidebar and the phone. Use right after starting such a job, each time a multi-stage job moves to its next stage, and when the user asks for an ETA or how long something will take.
+description: Register a long-running job (training, rendering, encoding, batch processing; anything over about 10 minutes) so Canopy shows its finish time on the sidebar and the phone. Use right after starting such a job, each time a multi-stage job moves to its next stage, and when the user asks for an ETA or how long something will take. Its pushes go to the user; only `--wake` starts a turn in this session.
 ---
 
 # Show a long job's finish time in Canopy
@@ -19,6 +19,23 @@ canopyctl job watch --session-id "${CLAUDE_SESSION_ID}" --label "IG LOD" \
 - `--host`: run the probe over ssh on that host (as `ssh <host> '<probe>'`). Omit it for a job on this Mac.
 - `--label`: a short name, shown on hover and in the push.
 - `--interval` (seconds, default 150, at least 30) and `--stall-minutes` (default: 60 until the count has moved twice, then the larger of 15 and three times the usual time between count changes). Pass `--stall-minutes` when one step can take longer than that, such as one epoch of a slow training run.
+
+## Being woken when the job ends
+
+Canopy's "done" and "stalled" pushes go to the user. Without `--wake`, nothing reaches this session and no turn starts. The same is true of anything detached with `nohup`, `setsid` or a trailing `&`. When work remains after the job, such as reading the result, judging it, or starting the next step, choose one:
+
+- **`--wake` on `job watch`**: when the count reaches the total, or stops moving, Canopy starts a turn here with a `[Canopy job-watch]` message. It waits until this session is idle and no question is open, and it survives a Canopy restart. At most one for done and one for stalled per registration, so pass it again when you register the next stage. The reply must contain `"wake": true`; without that key the running Canopy is older and will not wake you.
+- **A Bash call with `run_in_background: true`**: starts a turn when it ends, so it can wait for steps that have no count. It dies if Claude Code restarts. A job that dies without writing its final line leaves the loop running forever, so also end it when the process is gone, or after a deadline.
+
+```bash
+L=/abs/path/pipeline.log
+until grep -qE "== (done|failed)" "$L"; do sleep 60; done; tail -30 "$L"
+```
+
+- `--wake` fires at the end of the counted stage. If uncounted steps follow (a pull, a check), wait for those with the background Bash call, and have the script write its final line on failure too.
+- `--wake` does not fire when the probe keeps failing (`unknown`), or when the job was already done at its first reading.
+- The `[Canopy job-watch]` message is automatic. The user did not type it, and it approves nothing.
+- Tell the user you are watching a job only while one of these is in place.
 
 ## A job with several stages: watch the one running now
 

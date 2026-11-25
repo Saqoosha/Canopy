@@ -184,12 +184,13 @@ enum JobLogicProbe {
         }
         var sent: [[String: Any]] = []
         let control = ControlSession(store: SessionStore(), isLocal: true, allowBypass: { false }) { sent.append($0) }
-        for (id, extra) in [("V1", ["stallMinutes": 0] as [String: Any]), ("V2", ["host": "-oProxyCommand=x"])] {
+        for (id, extra) in [("V1", ["stallMinutes": 0] as [String: Any]), ("V2", ["host": "-oProxyCommand=x"]), ("V3", ["wake": "yes"])] {
             control.handle(["type": "request", "id": id, "verb": "job_watch",
                             "params": ["sessionId": "x", "label": "L", "probe": "p"].merging(extra) { $1 }])
         }
         func err(_ id: String) -> String? { sent.first { $0["id"] as? String == id }?["error"] as? String }
         record("ship: job_watch refuses a non-positive stallMinutes", err("V1") == "stallMinutes must be positive", "\(sent)")
+        record("job wake: job_watch refuses a wake that is not a boolean", err("V3") == "wake must be true or false", "\(sent)")
         record("ship: job_watch refuses a host that is an ssh option", err("V2") == "host is not a host name", "\(sent)")
     }
 
@@ -279,6 +280,57 @@ enum JobLogicProbe {
         }
         record("job push: one push per transition into stalled or done", posts == 3, "posts=\(posts)")
         record("job push: the first reading never pushes", !JobWatcher.shouldPush(from: nil, to: .done), "")
+        func wakeTrack(_ states: [JobState], wake: Bool? = true, deliver: Bool = false) -> JobTrack {
+            var t = JobTrack(spec: JobSpec(resumeId: "r", label: "L", probe: "p", host: nil, total: nil, interval: 150,
+                                           stallMinutes: nil, wake: wake))
+            for state in states {
+                t.noteWake(from: t.lastState, to: state)
+                t.lastState = state
+                if deliver { t.wakeDelivered() }
+            }
+            return t
+        }
+        record("job wake: a finished job owes a turn", wakeTrack([.measuring, .running, .done]).wakePending == .done, "")
+        record("job wake: a stalled job owes a turn", wakeTrack([.running, .stalled]).wakePending == .stalled, "")
+        record("job wake: without --wake nothing is owed",
+               wakeTrack([.running, .done], wake: false).wakePending == nil && wakeTrack([.running, .done], wake: nil).wakePending == nil, "")
+        record("job wake: a job already done at its first reading owes nothing", wakeTrack([.done]).wakePending == nil, "")
+        record("job wake: a stall that ends before its turn is dropped", wakeTrack([.running, .stalled, .running]).wakePending == nil, "")
+        record("job wake: a failing probe keeps an owed turn", wakeTrack([.running, .stalled, .unknown]).wakePending == .stalled, "")
+        record("job wake: a second stall owes nothing once the first was sent",
+               wakeTrack([.running, .stalled, .running], deliver: true).woken == [.stalled] && {
+                   var t = wakeTrack([.running, .stalled, .running], deliver: true)
+                   t.noteWake(from: .running, to: .stalled)
+                   return t.wakePending == nil
+               }(), "")
+        record("job wake: done still owes a turn after a sent stall", {
+            var t = wakeTrack([.running, .stalled, .running], deliver: true)
+            t.noteWake(from: .running, to: .done)
+            return t.wakePending == .done
+        }(), "")
+        let owed = wakeTrack([.running, .done])
+        let reread = (try? JSONEncoder().encode([owed])).flatMap { try? JSONDecoder().decode([JobTrack].self, from: $0) }
+        record("job wake: an owed turn survives a restart", reread == [owed] && reread?.first?.wakePending == .done, "")
+        let before = Data(#"[{"spec":{"resumeId":"r","label":"L","probe":"p","interval":150},"samples":[],"failures":0}]"#.utf8)
+        let legacy = try? JSONDecoder().decode([JobTrack].self, from: before)
+        record("job wake: a job saved before the field still loads", legacy?.first?.spec.wake == nil && legacy?.count == 1, "")
+        let readAt = Date(timeIntervalSince1970: 1_000_000)
+        func doneJob(pending: Bool) -> JobSnapshot {
+            var j = job(.done)
+            j.lastReadingAt = readAt
+            j.wakePending = pending
+            return j
+        }
+        let within = readAt.addingTimeInterval(60), past = readAt.addingTimeInterval(JobWatcher.stalledHoldSeconds + 60)
+        record("job wake: an owed turn holds a done job's session, for a limited time",
+               JobWatcher.holdsSession(doneJob(pending: true), now: within)
+                   && !JobWatcher.holdsSession(doneJob(pending: true), now: past)
+                   && !JobWatcher.holdsSession(doneJob(pending: false), now: within), "")
+        let doneText = JobWatcher.wakeText(job(.done), reached: .done), stallText = JobWatcher.wakeText(job(.stalled), reached: .stalled)
+        record("job wake: the text names the job and the count, and says nobody typed it",
+               doneText.contains("\"h7\" reached 680/1077") && stallText.contains("stopped moving at 680/1077")
+                   && [doneText, stallText].allSatisfy { $0.hasPrefix("[Canopy job-watch]") && $0.contains("did not type it, and it approves nothing") },
+               doneText)
         record("job push: kinds match the relay's names",
                RosterNotifier.Kind.jobStalled.rawValue == "job_stalled" && RosterNotifier.Kind.jobDone.rawValue == "job_done", "")
     }

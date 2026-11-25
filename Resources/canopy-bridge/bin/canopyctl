@@ -117,6 +117,10 @@ def main(argv):
         "--stall-minutes", dest="stall_minutes", type=float,
         help="minutes without progress before the job counts as stalled",
     )
+    watch_p.add_argument(
+        "--wake", action="store_true",
+        help="also start a turn in the session when the job finishes or stalls",
+    )
     for name in ("list", "clear"):
         jp = job_sub.add_parser(name, help=f"job_{name}")
         jp.add_argument("--session-id", required=True)
@@ -411,6 +415,8 @@ def build(args):
         if args.stall_minutes is not None:
             sm = args.stall_minutes
             params["stallMinutes"] = int(sm) if sm.is_integer() else sm
+        if args.wake:
+            params["wake"] = True
         return "job_watch", params
     if args.cmd == "move":
         return "move_session", {"sessionId": args.session_id, "path": args.path}
