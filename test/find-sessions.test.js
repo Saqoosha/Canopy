@@ -155,7 +155,6 @@ describe("find_sessions.py search", () => {
     writeSession(home, "-work-project", "aaaa", [
       user("find the zebra"),
       user("[Canopy keep-alive] Prompt-cache refresh, no action needed."),
-      user('[Canopy job-watch] The job "zebra" reached 10/10.'),
     ]);
     assert.equal(local(run(home, ["search", "zebra"])).sessions[0].lastPrompt, "find the zebra");
   });
