@@ -25,7 +25,8 @@ describe("Level 2: Integration", { timeout: 120000 }, () => {
 
     const reqId = shim.sendRequest("init");
     const response = await shim.waitForWebviewResponse(reqId, 15000);
-    assert.ok(response, "Should get a response to init");
+    // The extension answers a thrown init with a response too, of type "error".
+    assert.equal(response.response?.type, "init_response", response.response?.error);
   });
 
   it("responds to get_asset_uris", async () => {
