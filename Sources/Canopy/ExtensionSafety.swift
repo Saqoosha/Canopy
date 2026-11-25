@@ -5,8 +5,9 @@ import os.log
 private let logger = Logger(subsystem: "sh.saqoo.Canopy", category: "ExtensionUpdater")
 
 /// Starts a freshly downloaded Claude Code extension in a throwaway shim before Canopy adopts it.
-/// It checks activation only: no CLI is spawned and no message is exchanged. Extension updates
-/// that threw during `activate` (#193, #276) would have been stopped here.
+/// It checks activation and the page's `init` request, and runs no CLI. Extension updates that
+/// threw during `activate` (#193, #276) or while answering `init` (2.1.332, every new pane blank)
+/// would have been stopped here.
 enum ExtensionCanary {
     enum Outcome: Equatable {
         case passed
@@ -14,25 +15,52 @@ enum ExtensionCanary {
         case undecided
     }
 
-    /// The verdict so far from the shim's NDJSON stdout: it writes `ready` only after `activate`
-    /// returned, and an `error` frame then exits 1 when activation threw.
+    private static let initRequestId = "canopy-start-check"
+
+    /// What the page sends first. `ready` must come before it: the webview provider is not up earlier.
+    private static let initFrames = """
+    {"type":"webview_ready"}
+    {"type":"webview_message","message":{"type":"request","channelId":"","requestId":"\(initRequestId)","request":{"type":"init"}}}
+
+    """
+
+    static func isReady(stdout: String) -> Bool {
+        stdout.split(separator: "\n").contains { line in
+            let frame = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+            return frame?["type"] as? String == "ready"
+        }
+    }
+
+    /// The verdict so far from the shim's NDJSON stdout: an `error` frame means activation threw,
+    /// and the extension answers a thrown `init` with a response of type `error`.
     static func outcome(stdout: String, exitStatus: Int32?) -> Outcome {
+        var ready = false
         for line in stdout.split(separator: "\n") {
             guard let data = line.data(using: .utf8),
                   let frame = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { continue }
             switch frame["type"] as? String {
-            case "ready": return .passed
+            case "ready": ready = true
+            case "webview_message":
+                guard let envelope = frame["message"] as? [String: Any],
+                      let message = envelope["message"] as? [String: Any],
+                      message["requestId"] as? String == initRequestId,
+                      let response = message["response"] as? [String: Any] else { continue }
+                let type = response["type"] as? String ?? "no type"
+                if type == "init_response" { return .passed }
+                return .failed("the extension could not answer the page's init: \(response["error"] as? String ?? type)")
             case "error": return .failed(frame["message"] as? String ?? "the extension reported an error")
             default: continue
             }
         }
-        if let exitStatus { return .failed("the extension host exited with status \(exitStatus) before it was ready") }
+        if let exitStatus {
+            return .failed("the extension host exited with status \(exitStatus) before it \(ready ? "answered init" : "was ready")")
+        }
         return .undecided
     }
 
     /// Runs the shim against `extensionDir` with a scratch HOME, so it touches none of the user's
-    /// storage, and returns once it is ready, fails, or `timeout` passes. Blocks; call off the main thread.
+    /// storage, and returns once it answers `init`, fails, or `timeout` passes. Blocks; call off the main thread.
     static func run(extensionDir: URL, nodePath: String, shimPath: String, timeout: TimeInterval = 20) -> Outcome {
         let fm = FileManager.default
         let scratch = fm.temporaryDirectory.appendingPathComponent("cc-ext-canary-\(UUID().uuidString)")
@@ -43,7 +71,9 @@ enum ExtensionCanary {
         do {
             try fm.createDirectory(at: home, withIntermediateDirectories: true)
             try fm.createDirectory(at: cwd, withIntermediateDirectories: true)
-            try Data("{}".utf8).write(to: settings)
+            // `init` makes the extension run the CLI, which would write to the scratch HOME after it
+            // is removed. The wrapper replaces the CLI and exits; `init` is answered without it.
+            try Data(#"{"claudeCode.claudeProcessWrapper":"/usr/bin/true"}"#.utf8).write(to: settings)
         } catch {
             return .failed("could not prepare the check: \(error.localizedDescription)")
         }
@@ -61,6 +91,8 @@ enum ExtensionCanary {
         environment.removeValue(forKey: "ANTHROPIC_AUTH_TOKEN")
         process.environment = environment
         let stdin = Pipe()
+        // A host that dies right after `ready` must fail the check, not kill Canopy with SIGPIPE.
+        _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         let stdout = Pipe()
         process.standardInput = stdin
         process.standardOutput = stdout
@@ -97,6 +129,7 @@ enum ExtensionCanary {
         }
 
         let deadline = Date().addingTimeInterval(timeout)
+        var askedInit = false
         while Date() < deadline {
             if !process.isRunning {
                 // Read what the handler has not delivered yet, so the error frame written just
@@ -110,9 +143,15 @@ enum ExtensionCanary {
             }
             let verdict = outcome(stdout: buffer.text, exitStatus: nil)
             if verdict != .undecided { return logged(verdict, stdout: buffer.text, stderr: errBuffer.text) }
+            if !askedInit, isReady(stdout: buffer.text) {
+                askedInit = true
+                // A failed write means the host is gone, which the next pass reports.
+                try? stdin.fileHandleForWriting.write(contentsOf: Data(initFrames.utf8))
+            }
             Thread.sleep(forTimeInterval: 0.1)
         }
-        return .failed("the extension host did not become ready within \(Int(timeout)) s")
+        return logged(.failed("the extension host did not \(askedInit ? "answer init" : "become ready") within \(Int(timeout)) s"),
+                      stdout: buffer.text, stderr: errBuffer.text)
     }
 
     /// The node a version manager's shim (mise, asdf, nvm, Volta) stands for. The shim picks it

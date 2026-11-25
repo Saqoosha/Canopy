@@ -5,13 +5,20 @@ const readline = require("node:readline");
 const path = require("node:path");
 const fs = require("node:fs");
 
+// Newest version across Canopy's own extensions and VS Code's, or CANOPY_TEST_EXTENSION.
 function findExtensionPath() {
-  const dir = path.join(process.env.HOME, ".vscode", "extensions");
-  const entries = fs.readdirSync(dir)
-    .filter(e => e.startsWith("anthropic.claude-code-"))
-    .sort();
-  if (entries.length === 0) throw new Error("CC extension not found in ~/.vscode/extensions/");
-  return path.join(dir, entries[entries.length - 1]);
+  if (process.env.CANOPY_TEST_EXTENSION) return process.env.CANOPY_TEST_EXTENSION;
+  const dirs = [
+    path.join(process.env.HOME, "Library", "Application Support", "Canopy", "extensions"),
+    path.join(process.env.HOME, ".vscode", "extensions"),
+  ];
+  const found = dirs.filter(dir => fs.existsSync(dir)).flatMap(dir =>
+    fs.readdirSync(dir)
+      .filter(e => e.startsWith("anthropic.claude-code-"))
+      .map(e => path.join(dir, e)));
+  if (found.length === 0) throw new Error(`CC extension not found in ${dirs.join(" or ")}`);
+  found.sort((a, b) => path.basename(a).localeCompare(path.basename(b), "en", { numeric: true }));
+  return found[found.length - 1];
 }
 
 function spawnShim(opts = {}) {

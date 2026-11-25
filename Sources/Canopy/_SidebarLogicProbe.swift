@@ -16086,8 +16086,22 @@ enum SidebarLogicProbe {
         do {
             let ready = #"{"type":"log","message":"x"}"# + "\n" + #"{"type":"ready"}"# + "\n"
             let broken = #"{"type":"error","message":"Extension activation failed: boom","stack":"s"}"# + "\n"
-            record("extension canary: a ready shim passes",
-                   ExtensionCanary.outcome(stdout: ready, exitStatus: nil) == .passed)
+            func initAnswer(_ response: String) -> String {
+                ready + #"{"type":"webview_message","message":{"type":"from-extension","message":{"type":"response","requestId":"canopy-start-check","response":"#
+                    + response + "}}}\n"
+            }
+            record("extension canary: a ready shim is undecided until init is answered",
+                   ExtensionCanary.outcome(stdout: ready, exitStatus: nil) == .undecided && ExtensionCanary.isReady(stdout: ready))
+            record("extension canary: an answered init passes, also when the shim then exits",
+                   ExtensionCanary.outcome(stdout: initAnswer(#"{"type":"init_response","state":{}}"#), exitStatus: nil) == .passed
+                       && ExtensionCanary.outcome(stdout: initAnswer(#"{"type":"init_response","state":{}}"#), exitStatus: 0) == .passed)
+            record("extension canary: a thrown init fails with the extension's error (2.1.332)",
+                   ExtensionCanary.outcome(stdout: initAnswer(#"{"type":"error","error":"boom"}"#), exitStatus: nil)
+                       == .failed("the extension could not answer the page's init: boom"))
+            record("extension canary: an answer to another request decides nothing",
+                   ExtensionCanary.outcome(
+                       stdout: initAnswer(#"{"type":"error","error":"boom"}"#).replacingOccurrences(of: "canopy-start-check", with: "other"),
+                       exitStatus: nil) == .undecided)
             record("extension canary: an activation error fails with the shim's own message",
                    ExtensionCanary.outcome(stdout: broken, exitStatus: 1) == .failed("Extension activation failed: boom"))
             record("extension canary: exiting before ready fails, naming the status",
@@ -16095,8 +16109,9 @@ enum SidebarLogicProbe {
                        == .failed("the extension host exited with status 3 before it was ready"))
             record("extension canary: still starting is undecided, and a partial or garbled line is ignored",
                    ExtensionCanary.outcome(stdout: "not json\n" + #"{"type":"rea"#, exitStatus: nil) == .undecided)
-            record("extension canary: a shim that was ready and then exited still passed",
-                   ExtensionCanary.outcome(stdout: ready, exitStatus: 0) == .passed)
+            record("extension canary: a shim that was ready and exited before answering init fails",
+                   ExtensionCanary.outcome(stdout: ready, exitStatus: 0)
+                       == .failed("the extension host exited with status 0 before it answered init"))
             // A version manager's shim resolves its node from HOME, which the check replaces;
             // the fakes stand in for one that answers and one that cannot.
             let shimDir = FileManager.default.temporaryDirectory
