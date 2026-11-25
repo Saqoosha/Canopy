@@ -862,7 +862,7 @@ enum ClaudeSessionHistory {
         // slash-command record) and `<command-name>`.
         let otherPrefixes = [
             "Caveat:", "<command-", "<local-command",
-            "<task-notification", "<system-reminder",
+            "<task-notification", "<system-reminder", JobWatcher.wakePrefix,
             "[Request interrupted",
             "This session is being continued",
         ]

@@ -20,7 +20,6 @@ Saqoosha は長いジョブ（rt4090 の 3DGS 学習、Blender／独自レンダ
 - MacroPad への表示。`attentionLine` を MacroPad へ流すことも含む
 - background task の出力から `N/M` を自動で拾うこと（下の「作り方」の案 2）。登録忘れを補う機能として後から足せる
 - 工程の連鎖（抽出 → 学習 → エンコード）。v1 は 1 セッションにジョブ 1 本
-- ジョブが終わったときにセッションへ続きのプロンプトを送ること
 - miyagawa の Agent Board のようなタスクの Timeline
 
 ## 失敗の条件

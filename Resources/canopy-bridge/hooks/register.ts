@@ -130,8 +130,9 @@ async function saveSlackGate($) {
 // A task notification or a scheduled prompt does not lift the gate. `sdk` also covers `send_message`.
 const PERSON_ORIGINS = new Set(['composer', 'bridge', 'sdk'])
 
-// `KeepAliveGate.promptPrefix`: Canopy's own refresh reaches the CLI as `sdk`, like the person's prompts.
+// `KeepAliveGate.promptPrefix` and `JobWatcher.wakePrefix`: Canopy's own prompts reach the CLI as `sdk`, like the person's.
 const KEEP_ALIVE_PREFIX = '[Canopy keep-alive]'
+const JOB_WAKE_PREFIX = '[Canopy job-watch]'
 
 // These quote the sentence mid-line, as a subagent's report did. A delivered one starts a line, even joined.
 const QUOTING_ORIGINS = new Set(['task-notification', 'scheduled-trigger', 'peer', 'peer-send-message', 'projects-relay'])
@@ -141,7 +142,7 @@ function isQuote(e) {
 }
 
 function liftsGate(e) {
-  if (e.isMeta || e.turnId || String(e.text).startsWith(KEEP_ALIVE_PREFIX)) return false
+  if (e.isMeta || e.turnId || [KEEP_ALIVE_PREFIX, JOB_WAKE_PREFIX].some(p => String(e.text).startsWith(p))) return false
   // An unstamped origin keeps the gate. CLIs 2.1.301-2.1.307 and 2.1.318 stamp `sdk`.
   return PERSON_ORIGINS.has(e.origin?.kind)
 }

@@ -120,7 +120,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// The phone holds its sessions until Stop; a control-opened one is held only
     /// while a `listen` covers it, so a client that went away does not leave it running.
-    /// An unfinished registered job holds its session too: reaping it would drop the job.
+    /// A job that `JobWatcher.holdsSession` keeps holds its session too.
     nonisolated static func reaperHolds(heldByPhone: Bool, openedByControl: Bool, watched: Bool,
                                         activeJob: Bool) -> Bool {
         heldByPhone || (openedByControl && watched) || activeJob
@@ -747,7 +747,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // `isWorking` guard is sufficient from here on. See
                 // `phoneReplyInFlight`'s doc for why the gap before this
                 // point needed its own latch.
-                endPhoneReplyFlight()
+                endPhoneReplyFlight(started: true)
                 // The previous turn's streamed-event id is not this turn's.
                 // **This is the only site that sees every start.** It was
                 // first written into `trackWorkingState`'s assistant case,
@@ -1439,6 +1439,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Do not delete this as redundant with `isWorking` — that is exactly
     /// the asynchrony it exists to cover.
     private var phoneReplyInFlight = false
+    /// `submitIfIdle`'s callback for the reply in flight.
+    private var replyStarted: (@MainActor () -> Void)?
 
     /// Watchdog for a reply injected but never acknowledged by the CLI —
     /// same shape and cancellation discipline as `keepAliveTimeout`, guarding
@@ -1674,15 +1676,19 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// Injects `text` as a user turn if one can start right now. False changes nothing: the text is
-    /// not queued, so the caller keeps it and tries again.
-    func submitIfIdle(text: String) -> Bool {
-        guard blockingReasonForReply() == nil,
+    /// not queued, so the caller keeps it and tries again. `onStarted` runs once the CLI shows
+    /// activity, and never if it does not.
+    func submitIfIdle(text: String, onStarted: @escaping @MainActor () -> Void) -> Bool {
+        guard liveChannelOpen, boundSession?.pendingInitialPrompt == nil,
+              blockingReasonForReply() == nil,
               Self.phoneReplyMayInjectNow(queueIsEmpty: queuedPhoneReplies.isEmpty,
                                           gateReason: ineligibilityReasonForReply()) else { return false }
-        return requestPhoneReply(text: text)
+        guard requestPhoneReply(text: text) else { return false }
+        replyStarted = onStarted
+        return true
     }
 
-    /// Injects a reply typed on the phone as a real user turn.
+    /// Injects a reply typed on the phone, or a job wake, as a real user turn.
     ///
     /// Reuses `requestKeepAlive`'s busy-shim guard — never its swallow
     /// latches. A keep-alive hides itself on purpose; a reply is the
@@ -1692,7 +1698,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// `phoneReplyInFlight` — see that property's doc for why `isWorking`
     /// cannot do this job alone.
     ///
-    /// **Private: `submitPhoneReply` and `submitIfIdle` are the only doors.** A caller that
+    /// **Private: callers must check the queue first.** A caller that
     /// reached this directly would skip the queue, and skipping the queue
     /// means overtaking prompts the same user typed earlier.
     ///
@@ -1732,10 +1738,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             controlReplyIds.remove(replyId)
         }
         // The same envelope `requestKeepAlive` sends, with the phone's text.
-        // `origin: ["kind": "human"]` is correct and load-bearing here: a
-        // reply IS a human's input, arriving by a different route, and the
-        // CLI records it as one — unlike the keep-alive, this turn is meant
-        // to be visible in the transcript and the replay.
+        // Unlike the keep-alive, this turn is meant to be visible in the transcript and the replay.
         sendToShim([
             "type": "webview_message",
             "message": [
@@ -1862,8 +1865,11 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// Tear down the flight's state in one place, so no path can clear the
     /// latch and leave the watchdog behind.
-    private func endPhoneReplyFlight() {
+    private func endPhoneReplyFlight(started: Bool = false) {
         phoneReplyInFlight = false
+        let onStarted = replyStarted
+        replyStarted = nil
+        if started { onStarted?() }
         phoneReplyTimeout?.cancel()
         phoneReplyTimeout = nil
         // **An accepted trade, not an oversight.** This function is also
@@ -8368,7 +8374,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // still be treating a reply as in flight. The ordinary path
             // already cleared this the moment `isWorking` flipped true.
             // Also cancels the watchdog so it can't fire later.
-            endPhoneReplyFlight()
+            endPhoneReplyFlight(started: true)
             // If the turn ended without any AskUserQuestion permission
             // request being tracked, the `tool_use`-stream-derived
             // `lastAssistantHadAskUserQuestion` flag is orphaned — e.g. user
