@@ -47,7 +47,7 @@ REGEX_META = set("\\.+*?()|[]{}^$")
 PROMPT_MARKS = (b'"type":"user"', b'"queued_command"')
 CONVERSATION_MARKS = PROMPT_MARKS + (b'"type":"assistant"',)
 KEEP_ALIVE = "[Canopy keep-alive]"
-NOT_PROMPTS = ("<", "[Request", KEEP_ALIVE)
+NOT_PROMPTS = ("<", "[Request", KEEP_ALIVE, "[Canopy job-watch]")
 NOT_CONVERSATION = ("isSidechain", "isMeta", "isSynthetic", "isCompactSummary", "isVisibleInTranscriptOnly")
 # Backs up the -- in call_peer: -oProxyCommand would run a command here.
 SAFE_ADDRESS = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]*\Z")

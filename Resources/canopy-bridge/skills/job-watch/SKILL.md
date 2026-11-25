@@ -29,7 +29,8 @@ Canopy's "done" and "stalled" pushes go to the user. Without `--wake`, nothing r
 
 ```bash
 L=/abs/path/pipeline.log
-for i in $(seq 720); do grep -qE "== (done|failed)" "$L" && break; sleep 60; done; tail -30 "$L"
+for i in $(seq 720); do grep -qE "== (done|failed)" "$L" && { tail -30 "$L"; exit; }; sleep 60; done
+echo "no final line after 12 hours"; exit 1
 ```
 
 - `--wake` fires at the end of the counted stage. If uncounted steps follow (a pull, a check), wait for those with the background Bash call, and have the script write its final line on failure too.

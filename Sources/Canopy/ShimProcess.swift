@@ -286,7 +286,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// mirror. Nil before the primary's first `launch_claude`.
     private var primaryOwnChannel: String?
     /// Whether the extension currently holds the channel in `channelId`.
-    private var liveChannelOpen = false
+    private var liveChannelOpen = false {
+        didSet { if !liveChannelOpen { awaitedStart = nil } }
+    }
     /// The first webview's `init_response`, kept so a later webview's `init` can be
     /// answered here. Forwarding it is fatal: the extension's `init` handler
     /// reads a second init as "the client reloaded" and closes EVERY channel
@@ -747,7 +749,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 // `isWorking` guard is sufficient from here on. See
                 // `phoneReplyInFlight`'s doc for why the gap before this
                 // point needed its own latch.
-                endPhoneReplyFlight(started: true)
+                endPhoneReplyFlight()
                 // The previous turn's streamed-event id is not this turn's.
                 // **This is the only site that sees every start.** It was
                 // first written into `trackWorkingState`'s assistant case,
@@ -1439,8 +1441,23 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Do not delete this as redundant with `isWorking` — that is exactly
     /// the asynchrony it exists to cover.
     private var phoneReplyInFlight = false
-    /// `submitIfIdle`'s callback for the reply in flight.
-    private var replyStarted: (@MainActor () -> Void)?
+    /// The text `submitIfIdle` sent and its callback, until this CLI confirms it or is gone.
+    private var awaitedStart: (text: String, onStarted: @MainActor () -> Void)?
+
+    private func confirmAwaitedStart() {
+        let onStarted = awaitedStart?.onStarted
+        awaitedStart = nil
+        onStarted?()
+    }
+
+    /// The CLI's echo of a prompt with exactly `text` in the main conversation.
+    nonisolated static func echoes(_ text: String, _ ioMsg: [String: Any]) -> Bool {
+        guard ioMsg["parent_tool_use_id"] as? String == nil, let message = ioMsg["message"] as? [String: Any] else { return false }
+        let blocks = message["content"] as? [[String: Any]] ?? []
+        let joined = message["content"] as? String
+            ?? blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }.joined(separator: "\n")
+        return joined.trimmingCharacters(in: .whitespacesAndNewlines) == text
+    }
 
     /// Watchdog for a reply injected but never acknowledged by the CLI —
     /// same shape and cancellation discipline as `keepAliveTimeout`, guarding
@@ -1676,15 +1693,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     }
 
     /// Injects `text` as a user turn if one can start right now. False changes nothing: the text is
-    /// not queued, so the caller keeps it and tries again. `onStarted` runs once the CLI shows
-    /// activity, and never if it does not.
+    /// not queued, so the caller keeps it and tries again. `onStarted` runs once the CLI echoes the text
+    /// or ends a turn; until then a later call is refused, so one CLI never gets the text twice.
     func submitIfIdle(text: String, onStarted: @escaping @MainActor () -> Void) -> Bool {
-        guard liveChannelOpen, boundSession?.pendingInitialPrompt == nil,
+        guard awaitedStart == nil, liveChannelOpen, boundSession?.pendingInitialPrompt == nil,
               blockingReasonForReply() == nil,
               Self.phoneReplyMayInjectNow(queueIsEmpty: queuedPhoneReplies.isEmpty,
                                           gateReason: ineligibilityReasonForReply()) else { return false }
         guard requestPhoneReply(text: text) else { return false }
-        replyStarted = onStarted
+        awaitedStart = (text.trimmingCharacters(in: .whitespacesAndNewlines), onStarted)
         return true
     }
 
@@ -1865,11 +1882,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     /// Tear down the flight's state in one place, so no path can clear the
     /// latch and leave the watchdog behind.
-    private func endPhoneReplyFlight(started: Bool = false) {
+    private func endPhoneReplyFlight() {
         phoneReplyInFlight = false
-        let onStarted = replyStarted
-        replyStarted = nil
-        if started { onStarted?() }
         phoneReplyTimeout?.cancel()
         phoneReplyTimeout = nil
         // **An accepted trade, not an oversight.** This function is also
@@ -6878,6 +6892,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         // watchdog, which would otherwise fire later against a shim that no
         // longer has anything for it to unlatch.
         endPhoneReplyFlight()
+        awaitedStart = nil
         discardQueuedPhoneReplies()
         controlTurnReplyId = nil
         // The id of an event streamed by the shim that just died. The
@@ -8346,6 +8361,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             isWorking = true
         case "user":
             if let prompt = Self.livePrompt(ioMsg) { turnPrompt = prompt }
+            if let awaited = awaitedStart, Self.echoes(awaited.text, ioMsg) { confirmAwaitedStart() }
             processUserToolResults(ioMsg)
         case "result":
             // Capture before the `isWorking` gate: an immediate API error can
@@ -8374,7 +8390,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             // still be treating a reply as in flight. The ordinary path
             // already cleared this the moment `isWorking` flipped true.
             // Also cancels the watchdog so it can't fire later.
-            endPhoneReplyFlight(started: true)
+            endPhoneReplyFlight()
+            confirmAwaitedStart()
             // If the turn ended without any AskUserQuestion permission
             // request being tracked, the `tool_use`-stream-derived
             // `lastAssistantHadAskUserQuestion` flag is orphaned — e.g. user

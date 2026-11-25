@@ -51,18 +51,18 @@ struct JobTrack: Codable, Equatable {
     var wakePending: JobState?
     /// States whose turn has started: at most one of each per registration.
     var woken: [JobState]?
-    /// Times the owed turn was sent without the CLI showing activity.
-    var wakeAttempts: Int?
+    /// When `wakePending` was set; the session is held for it from here.
+    var wakeOwedAt: Date?
 
     init(spec: JobSpec) { self.spec = spec }
 
     /// Owes the session a turn on the same transitions that push, if the job asked for one.
     /// A stall that ends before its turn went out is dropped; a failing probe (`unknown`) keeps it.
-    mutating func noteWake(from previous: JobState?, to next: JobState) {
+    mutating func noteWake(from previous: JobState?, to next: JobState, at now: Date) {
         guard spec.wake == true else { return }
-        if next == .running || next == .measuring { (wakePending, wakeAttempts) = (nil, nil) }
+        if next == .running || next == .measuring { (wakePending, wakeOwedAt) = (nil, nil) }
         if JobWatcher.shouldPush(from: previous, to: next), !(woken ?? []).contains(next) {
-            (wakePending, wakeAttempts) = (next, nil)
+            (wakePending, wakeOwedAt) = (next, now)
         }
     }
 
@@ -71,15 +71,15 @@ struct JobTrack: Codable, Equatable {
         let previous = lastState
         record(output: output, exitStatus: exitStatus, at: now)
         let state = snapshot(now: now).state
-        noteWake(from: previous, to: state)
+        noteWake(from: previous, to: state, at: now)
         lastState = state
         return previous
     }
 
-    mutating func wakeDelivered() {
-        guard let state = wakePending else { return }
+    /// `state`'s turn started. A different turn may be owed by now.
+    mutating func wakeDelivered(_ state: JobState) {
         woken = (woken ?? []) + [state]
-        (wakePending, wakeAttempts) = (nil, nil)
+        if wakePending == state { (wakePending, wakeOwedAt) = (nil, nil) }
     }
 
     /// Whether the owed turn may go out before the next reading. A stall may not: the job can have
@@ -113,7 +113,7 @@ struct JobTrack: Codable, Equatable {
                                          now: now, stallMinutes: spec.stallMinutes, previous: lastState)
         snap.note = note
         snap.lastReadingAt = samples.last?.at
-        snap.wakePending = wakePending != nil
+        snap.wakeOwedAt = wakeOwedAt
         return snap
     }
 
@@ -301,40 +301,29 @@ final class JobWatcher {
 
     /// Between tries to send a done job's turn while its session is busy or asking.
     private static let wakeRetrySeconds: TimeInterval = 10
-    /// Sends without any CLI activity before an owed turn is given up.
-    static let wakeAttemptLimit = 3
 
     /// Sends the turn a job owes its session, or leaves it for later. Not through the phone-reply
     /// queue: that queue is dropped when the session restarts.
     private func deliverWake(_ id: String) {
-        guard var track = tracks[id], let state = track.wakePending, let session = session(id) else { return }
+        guard let track = tracks[id], let state = track.wakePending, let session = session(id) else { return }
         if state == .done { retryWake(id) }
         guard let shim = session.shim else { return }
-        if track.wakeAttempts ?? 0 >= Self.wakeAttemptLimit {
-            logger.error("job wake: \(state.rawValue, privacy: .public) for \(id.prefix(8), privacy: .public) given up after \(Self.wakeAttemptLimit) sends")
-            finishWake(id)
-            return
-        }
         shim.launchHeadlessChannel()
         let generation = generations[id, default: 0]
         guard shim.submitIfIdle(text: Self.wakeText(track.snapshot(now: Date()), reached: state), onStarted: {
-            let watcher = JobWatcher.shared
-            // Re-registered, or the stall ended, while the turn was starting.
-            guard watcher.generations[id, default: 0] == generation, watcher.tracks[id]?.wakePending == state else { return }
-            watcher.finishWake(id)
+            JobWatcher.shared.wakeStarted(id, state: state, generation: generation)
         }) else { return }
-        track.wakeAttempts = (track.wakeAttempts ?? 0) + 1
-        tracks[id] = track
-        save()
         logger.notice("job wake: \(state.rawValue, privacy: .public) sent to \(id.prefix(8), privacy: .public)")
     }
 
-    private func finishWake(_ id: String) {
-        guard var track = tracks[id] else { return }
-        track.wakeDelivered()
+    private func wakeStarted(_ id: String, state: JobState, generation: Int) {
+        // Re-registered while the turn was starting: that job owes its own.
+        guard generations[id, default: 0] == generation, var track = tracks[id] else { return }
+        track.wakeDelivered(state)
         tracks[id] = track
         save()
         session(id)?.job = track.snapshot(now: Date())
+        logger.notice("job wake: \(state.rawValue, privacy: .public) started in \(id.prefix(8), privacy: .public)")
     }
 
     private func retryWake(_ id: String) {
@@ -369,16 +358,15 @@ final class JobWatcher {
 
     /// Whether a session's job keeps the daemon from reaping it: one that is measuring or
     /// running, stalled for under `stalledHoldSeconds`, or `unknown` with a good reading in that
-    /// time (a short outage, such as an unseen 1Password prompt, must not drop the job). `done`
-    /// holds only while its turn is owed (`wakePending`, read within that time).
+    /// time (a short outage, such as an unseen 1Password prompt, must not drop the job). An owed
+    /// turn holds in any state, for that time from `wakeOwedAt`; `done` holds only by one.
     nonisolated static func holdsSession(_ job: JobSnapshot?, now: Date = Date()) -> Bool {
         guard let job else { return false }
-        let readRecently = job.lastReadingAt.map { now.timeIntervalSince($0) < stalledHoldSeconds } ?? false
-        if job.wakePending, readRecently { return true }
+        if let owed = job.wakeOwedAt, now.timeIntervalSince(owed) < stalledHoldSeconds { return true }
         switch job.state {
         case .measuring, .running: return true
         case .stalled: return job.stalledSince.map { now.timeIntervalSince($0) < stalledHoldSeconds } ?? true
-        case .unknown: return readRecently
+        case .unknown: return job.lastReadingAt.map { now.timeIntervalSince($0) < stalledHoldSeconds } ?? false
         case .done: return false
         }
     }
