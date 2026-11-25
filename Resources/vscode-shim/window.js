@@ -569,6 +569,10 @@ function createWindow() {
       };
     },
 
+    // Constant, and equal to the webview's own default. CC 2.1.332 destructures it
+    // while handling the page's `init`; undefined fails that request and the pane stays blank.
+    state: { focused: true, active: true },
+
     // -- onDidChange* events (all no-op) ------------------------------------
 
     onDidChangeActiveTextEditor: noopEvent,

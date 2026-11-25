@@ -1149,6 +1149,10 @@ describe("window webview bridge", () => {
     assert.equal(await webview.postMessage({ type: "hello" }), true);
   });
 
+  it("reports a focused, active window state, which CC 2.1.332 destructures on every init", () => {
+    assert.deepEqual(win.state, { focused: true, active: true });
+  });
+
   it("webview.onDidReceiveMessage fires from _handleWebviewMessage", () => {
     const provider = {
       resolveWebviewView(_view, _ctx, _token) {},
