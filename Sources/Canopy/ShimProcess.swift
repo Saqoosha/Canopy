@@ -71,6 +71,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         "CANOPY_CLI_CWD",
         "CANOPY_WORKTREE",
         "CANOPY_CONTROL_SOCK",
+        assignedModelMarkerKey,
         // Not Canopy's namespace, but Canopy assigns it per session: an
         // inherited one would put every session into coordinator mode.
         coordinatorModeEnvKey,
@@ -94,6 +95,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// per-site `removeValue` is a list that only one of them ever has all of.
     static func scrubbingCanopyAssignedKeys(_ environment: [String: String]) -> [String: String] {
         var scrubbed = environment
+        if let mine = scrubbed[assignedModelMarkerKey], scrubbed["ANTHROPIC_MODEL"] == mine {
+            scrubbed.removeValue(forKey: "ANTHROPIC_MODEL")
+        }
         for key in canopyAssignedEnvKeys { scrubbed.removeValue(forKey: key) }
         return scrubbed
     }
@@ -3240,6 +3244,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
 
         Self.applyModelSelection(to: &env, model: model, effortLevel: effortLevel, remote: remoteHost != nil)
+        if remoteHost == nil { Self.applyClaudeSettings(Self.localSettingsPairs(model: model, effortLevel: effortLevel)) }
 
         // Pin the standard 200K context tier when the user picked a non-1M Opus model.
         // For 1M-eligible accounts the CLI force-appends "[1m]" to ANY opus model at
@@ -4255,15 +4260,63 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Claude Settings
 
-    /// The launcher's model and effort reach the CLI per process, never through the shared
-    /// ~/.claude/settings.json: locally as env vars, which beat settings.json (measured on CLI
-    /// 2.1.332), remotely as `CANOPY_REMOTE_*`, which ssh-claude-wrapper.sh turns into flags.
-    /// "Auto" (nil or empty) sets nothing, so an inherited `ANTHROPIC_MODEL` still applies.
+    /// Model goes on the CLI's env (an in-session /model still wins; measured on CLI 2.1.332), effort does not:
+    /// `CLAUDE_CODE_EFFORT_LEVEL` locks out /effort and the webview's picker, so effort stays in settings.json.
     nonisolated static func applyModelSelection(to env: inout [String: String], model: String?,
                                                 effortLevel: String?, remote: Bool) {
-        if let model, !model.isEmpty { env[remote ? "CANOPY_REMOTE_MODEL" : "ANTHROPIC_MODEL"] = model }
-        if let effortLevel, !effortLevel.isEmpty {
-            env[remote ? "CANOPY_REMOTE_EFFORT" : "CLAUDE_CODE_EFFORT_LEVEL"] = effortLevel
+        if remote {
+            if let model, !model.isEmpty { env["CANOPY_REMOTE_MODEL"] = model }
+            if let effortLevel, !effortLevel.isEmpty { env["CANOPY_REMOTE_EFFORT"] = effortLevel }
+        } else if let model, !model.isEmpty {
+            env["ANTHROPIC_MODEL"] = model
+            env[assignedModelMarkerKey] = model
+        }
+    }
+
+    /// Marks an `ANTHROPIC_MODEL` as Canopy's, so a Canopy started inside a session drops it but keeps a user-exported one.
+    nonisolated static let assignedModelMarkerKey = "CANOPY_ASSIGNED_MODEL"
+
+    /// What a local launch writes to settings.json: effort as picked, and on Auto the removal of a `model` older Canopy wrote.
+    nonisolated static func localSettingsPairs(model: String?, effortLevel: String?) -> [(key: String, value: String?)] {
+        var pairs: [(key: String, value: String?)] = []
+        if model?.isEmpty ?? true { pairs.append(("model", nil)) }
+        pairs.append(("effortLevel", effortLevel.flatMap { $0.isEmpty ? nil : $0 }))
+        return pairs
+    }
+
+    /// Write or remove keys in ~/.claude/settings.json; a no-op change skips the write, since a write reformats the whole file and chezmoi then sees drift.
+    static func applyClaudeSettings(
+        _ pairs: [(key: String, value: String?)],
+        claudeDir: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
+    ) {
+        let path = claudeDir.appendingPathComponent("settings.json")
+        var dict: [String: Any] = [:]
+        if FileManager.default.fileExists(atPath: path.path),
+           let data = try? Data(contentsOf: path), !String(decoding: data, as: UTF8.self).allSatisfy(\.isWhitespace) {
+            guard let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                logger.error("settings.json exists but does not read as a JSON object; not writing \(path.path, privacy: .public)")
+                return
+            }
+            dict = parsed
+        }
+        var changed = false
+        for (key, value) in pairs {
+            if let value {
+                if dict[key] as? String != value { dict[key] = value; changed = true }
+            } else if dict.removeValue(forKey: key) != nil {
+                changed = true
+            }
+        }
+        guard changed else { return }
+        let desc = pairs.map { "\($0.key)=\($0.value ?? "nil")" }.joined(separator: ", ")
+        do {
+            try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(
+                withJSONObject: dict, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            try data.write(to: path)
+            logger.notice("Applied ~/.claude/settings.json: \(desc, privacy: .public)")
+        } catch {
+            logger.error("settings.json write failed (\(desc, privacy: .public)): \(error.localizedDescription, privacy: .public)")
         }
     }
 
