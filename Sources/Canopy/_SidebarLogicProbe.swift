@@ -16704,6 +16704,38 @@ enum SidebarLogicProbe {
             record("user settings file: setup failed", false, "\(error)")
         }
 
+        // applyModelSelection / localSettingsPairs: model on the CLI's env, effort in settings.json.
+        do {
+            let marker = ShimProcess.assignedModelMarkerKey
+            var local: [String: String] = [:]
+            ShimProcess.applyModelSelection(to: &local, model: "sonnet", effortLevel: "high", remote: false)
+            record("model selection: a local session gets ANTHROPIC_MODEL and its marker, and no effort env",
+                   local == ["ANTHROPIC_MODEL": "sonnet", marker: "sonnet"], "\(local)")
+            var remote: [String: String] = [:]
+            ShimProcess.applyModelSelection(to: &remote, model: "sonnet", effortLevel: "high", remote: true)
+            record("model selection: a remote session gets the wrapper's CANOPY_REMOTE_* keys",
+                   remote == ["CANOPY_REMOTE_MODEL": "sonnet", "CANOPY_REMOTE_EFFORT": "high"], "\(remote)")
+            var auto = ["ANTHROPIC_MODEL": "inherited"]
+            ShimProcess.applyModelSelection(to: &auto, model: "", effortLevel: nil, remote: false)
+            record("model selection: Auto sets nothing and keeps an inherited ANTHROPIC_MODEL",
+                   auto == ["ANTHROPIC_MODEL": "inherited"], "\(auto)")
+
+            let picked = ShimProcess.localSettingsPairs(effortLevel: "high", legacyModelCleaned: true)
+            record("model selection: a picked effort is written and the model key is left alone",
+                   picked.map(\.key) == ["effortLevel"] && picked.first?.value == "high")
+            record("model selection: Auto effort leaves settings.json alone",
+                   ShimProcess.localSettingsPairs(effortLevel: "", legacyModelCleaned: true).isEmpty)
+            let first = ShimProcess.localSettingsPairs(effortLevel: nil, legacyModelCleaned: false)
+            record("model selection: the first launch removes the model an older Canopy wrote",
+                   first.map(\.key) == ["model"] && first.first?.value == nil)
+
+            let nested = ShimProcess.scrubbingCanopyAssignedKeys(["ANTHROPIC_MODEL": "sonnet", marker: "sonnet"])
+            record("env scrub: a Canopy-assigned ANTHROPIC_MODEL is dropped with its marker", nested.isEmpty, "\(nested)")
+            let exported = ShimProcess.scrubbingCanopyAssignedKeys(["ANTHROPIC_MODEL": "glm", marker: "sonnet"])
+            record("env scrub: an ANTHROPIC_MODEL the user changed or exported is kept",
+                   exported == ["ANTHROPIC_MODEL": "glm"], "\(exported)")
+        }
+
         // applyClaudeSettings: skips no-op writes, never clobbers an unparseable file, follows a symlink.
         do {
             let fm = FileManager.default
@@ -16724,9 +16756,9 @@ enum SidebarLogicProbe {
 
             """.utf8)
             try original.write(to: file)
-            ShimProcess.applyClaudeSettings([("model", "opus"), ("effortLevel", "high")], claudeDir: dir)
-            record("apply settings: unchanged values leave the bytes alone",
-                   (try? Data(contentsOf: file)) == original)
+            let noOp = ShimProcess.applyClaudeSettings([("model", "opus"), ("effortLevel", "high")], claudeDir: dir)
+            record("apply settings: unchanged values leave the bytes alone and report success",
+                   (try? Data(contentsOf: file)) == original && noOp)
             ShimProcess.applyClaudeSettings([("model", "opus"), ("missingKey", nil)], claudeDir: dir)
             record("apply settings: removing an absent key leaves the bytes alone",
                    (try? Data(contentsOf: file)) == original)
@@ -16740,9 +16772,9 @@ enum SidebarLogicProbe {
 
             let broken = Data("{ \"model\": \"op".utf8)  // a half-written file
             try broken.write(to: file)
-            ShimProcess.applyClaudeSettings([("model", "sonnet")], claudeDir: dir)
-            record("apply settings: an unparseable file is not overwritten",
-                   (try? Data(contentsOf: file)) == broken)
+            let brokenResult = ShimProcess.applyClaudeSettings([("model", "sonnet")], claudeDir: dir)
+            record("apply settings: an unparseable file is not overwritten and reports failure",
+                   (try? Data(contentsOf: file)) == broken && !brokenResult)
 
             try Data().write(to: file)
             ShimProcess.applyClaudeSettings([("model", "sonnet")], claudeDir: dir)

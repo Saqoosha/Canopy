@@ -69,10 +69,10 @@ for arg in "$@"; do
     REMOTE_ARGS="$REMOTE_ARGS $(shell_quote "$arg")"
 done
 
-# Model/effort selection. Locally Canopy writes these to ~/.claude/settings.json,
-# but the remote CLI reads the remote settings file, so the launcher selection
-# never reaches it. ShimProcess passes the selection via env vars; append them
-# as CLI flags, which override the remote settings.json.
+# Model/effort selection. Locally Canopy sets ANTHROPIC_MODEL and writes effort
+# to ~/.claude/settings.json; neither reaches the remote CLI. ShimProcess passes
+# the selection via env vars; append them as CLI flags, which override the remote
+# settings.json.
 if [ -n "${CANOPY_REMOTE_MODEL:-}" ]; then
     REMOTE_ARGS="$REMOTE_ARGS --model $(shell_quote "$CANOPY_REMOTE_MODEL")"
 fi

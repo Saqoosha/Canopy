@@ -71,6 +71,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         "CANOPY_CLI_CWD",
         "CANOPY_WORKTREE",
         "CANOPY_CONTROL_SOCK",
+        assignedModelMarkerKey,
         // Not Canopy's namespace, but Canopy assigns it per session: an
         // inherited one would put every session into coordinator mode.
         coordinatorModeEnvKey,
@@ -94,6 +95,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// per-site `removeValue` is a list that only one of them ever has all of.
     static func scrubbingCanopyAssignedKeys(_ environment: [String: String]) -> [String: String] {
         var scrubbed = environment
+        if let mine = scrubbed[assignedModelMarkerKey], scrubbed["ANTHROPIC_MODEL"] == mine {
+            scrubbed.removeValue(forKey: "ANTHROPIC_MODEL")
+        }
         for key in canopyAssignedEnvKeys { scrubbed.removeValue(forKey: key) }
         return scrubbed
     }
@@ -3239,17 +3243,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
             env.removeValue(forKey: "CLAUDE_CODE_SESSION_NAME")
         }
 
-        // Write model/effort to ~/.claude/settings.json before CLI starts.
-        // Remote sessions skip this: the CLI runs on the remote host and reads
-        // the remote ~/.claude/settings.json, so a local write only pollutes
-        // local defaults. The selection travels via CANOPY_REMOTE_MODEL/EFFORT
-        // env vars instead, which ssh-claude-wrapper.sh turns into --model /
-        // --effort CLI flags on the remote command line.
+        Self.applyModelSelection(to: &env, model: model, effortLevel: effortLevel, remote: remoteHost != nil)
         if remoteHost == nil {
-            Self.applyClaudeSettings([("model", model), ("effortLevel", effortLevel)])
-        } else {
-            if let model, !model.isEmpty { env["CANOPY_REMOTE_MODEL"] = model }
-            if let effortLevel, !effortLevel.isEmpty { env["CANOPY_REMOTE_EFFORT"] = effortLevel }
+            let cleaned = UserDefaults.standard.bool(forKey: Self.legacyModelCleanedKey)
+            let pairs = Self.localSettingsPairs(effortLevel: effortLevel, legacyModelCleaned: cleaned)
+            let applied = pairs.isEmpty || Self.applyClaudeSettings(pairs)
+            if !cleaned, applied { UserDefaults.standard.set(true, forKey: Self.legacyModelCleanedKey) }
         }
 
         // Pin the standard 200K context tier when the user picked a non-1M Opus model.
@@ -4266,18 +4265,45 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Claude Settings
 
+    /// Model goes on the CLI's env (an in-session /model still wins; measured on CLI 2.1.332), effort does not:
+    /// `CLAUDE_CODE_EFFORT_LEVEL` locks out /effort and the webview's picker, so effort stays in settings.json.
+    nonisolated static func applyModelSelection(to env: inout [String: String], model: String?,
+                                                effortLevel: String?, remote: Bool) {
+        if remote {
+            if let model, !model.isEmpty { env["CANOPY_REMOTE_MODEL"] = model }
+            if let effortLevel, !effortLevel.isEmpty { env["CANOPY_REMOTE_EFFORT"] = effortLevel }
+        } else if let model, !model.isEmpty {
+            env["ANTHROPIC_MODEL"] = model
+            env[assignedModelMarkerKey] = model
+        }
+    }
+
+    /// Marks an `ANTHROPIC_MODEL` as Canopy's, so a Canopy started inside a session drops it but keeps a user-exported one.
+    nonisolated static let assignedModelMarkerKey = "CANOPY_ASSIGNED_MODEL"
+
+    /// What a local launch writes to settings.json: a picked effort (Auto leaves the user's alone), and once the removal of the `model` older Canopy wrote.
+    nonisolated static func localSettingsPairs(effortLevel: String?, legacyModelCleaned: Bool) -> [(key: String, value: String?)] {
+        var pairs: [(key: String, value: String?)] = []
+        if !legacyModelCleaned { pairs.append(("model", nil)) }
+        if let effortLevel, !effortLevel.isEmpty { pairs.append(("effortLevel", effortLevel)) }
+        return pairs
+    }
+
+    nonisolated static let legacyModelCleanedKey = "settings.legacyModelCleaned"
+
     /// Write or remove keys in ~/.claude/settings.json; a no-op change skips the write, since a write reformats the whole file and chezmoi then sees drift.
+    @discardableResult
     static func applyClaudeSettings(
         _ pairs: [(key: String, value: String?)],
         claudeDir: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
-    ) {
+    ) -> Bool {
         let path = claudeDir.appendingPathComponent("settings.json")
         var dict: [String: Any] = [:]
         if FileManager.default.fileExists(atPath: path.path),
            let data = try? Data(contentsOf: path), !String(decoding: data, as: UTF8.self).allSatisfy(\.isWhitespace) {
             guard let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 logger.error("settings.json exists but does not read as a JSON object; not writing \(path.path, privacy: .public)")
-                return
+                return false
             }
             dict = parsed
         }
@@ -4289,7 +4315,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 changed = true
             }
         }
-        guard changed else { return }
+        guard changed else { return true }
         let desc = pairs.map { "\($0.key)=\($0.value ?? "nil")" }.joined(separator: ", ")
         do {
             try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
@@ -4297,8 +4323,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 withJSONObject: dict, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
             try data.write(to: path)
             logger.notice("Applied ~/.claude/settings.json: \(desc, privacy: .public)")
+            return true
         } catch {
             logger.error("settings.json write failed (\(desc, privacy: .public)): \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 
@@ -8726,9 +8754,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// configuration Canopy ships by default, and only the first one keys
     /// `modelUsage`. Measured across nine captures against CLI 2.1.217 (the
     /// two rows below are the disagreements; the other seven agreed). These
-    /// are capture-harness invocations — a local Canopy session writes the
-    /// model into `~/.claude/settings.json` rather than passing `--model`, so
-    /// read the first row as "no model selected":
+    /// are capture-harness invocations — a local Canopy session passes the
+    /// model as `ANTHROPIC_MODEL` rather than `--model`, so read the first row
+    /// as "no model selected":
     ///
     ///                             init.model            message_start.model  modelUsage key
     ///     no --model (default)    claude-opus-4-8[1m]   claude-opus-4-8      claude-opus-4-8[1m]
