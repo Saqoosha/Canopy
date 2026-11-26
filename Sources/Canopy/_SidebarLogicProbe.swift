@@ -16704,62 +16704,20 @@ enum SidebarLogicProbe {
             record("user settings file: setup failed", false, "\(error)")
         }
 
-        // applyClaudeSettings: skips no-op writes, never clobbers an unparseable file, follows a symlink.
+        // applyModelSelection: the launcher's pick reaches the CLI as per-process env, never settings.json.
         do {
-            let fm = FileManager.default
-            let dir = fm.temporaryDirectory.appendingPathComponent("canopy-apply-settings-\(UUID().uuidString)")
-            defer { try? fm.removeItem(at: dir) }
-            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-            let file = dir.appendingPathComponent("settings.json")
-            func parsed() -> NSDictionary? {
-                (try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? NSDictionary }
-            }
-            // Formatted like the CLI (": "), unlike JSONSerialization (" : "), so any rewrite changes the bytes.
-            let original = Data("""
-            {
-              "$schema": "https://json.schemastore.org/claude-code-settings.json",
-              "effortLevel": "high",
-              "model": "opus"
-            }
-
-            """.utf8)
-            try original.write(to: file)
-            ShimProcess.applyClaudeSettings([("model", "opus"), ("effortLevel", "high")], claudeDir: dir)
-            record("apply settings: unchanged values leave the bytes alone",
-                   (try? Data(contentsOf: file)) == original)
-            ShimProcess.applyClaudeSettings([("model", "opus"), ("missingKey", nil)], claudeDir: dir)
-            record("apply settings: removing an absent key leaves the bytes alone",
-                   (try? Data(contentsOf: file)) == original)
-            ShimProcess.applyClaudeSettings([("model", "sonnet"), ("effortLevel", nil)], claudeDir: dir)
-            record("apply settings: a change sets, removes and keeps the other keys",
-                   parsed() == ["$schema": "https://json.schemastore.org/claude-code-settings.json", "model": "sonnet"],
-                   "\(parsed() ?? [:])")
-            let body = (try? String(contentsOf: file, encoding: .utf8)) ?? ""
-            record("apply settings: URLs are written without escaped slashes",
-                   body.contains("https://json.schemastore.org") && !body.contains("\\/"), body)
-
-            let broken = Data("{ \"model\": \"op".utf8)  // a half-written file
-            try broken.write(to: file)
-            ShimProcess.applyClaudeSettings([("model", "sonnet")], claudeDir: dir)
-            record("apply settings: an unparseable file is not overwritten",
-                   (try? Data(contentsOf: file)) == broken)
-
-            try Data().write(to: file)
-            ShimProcess.applyClaudeSettings([("model", "sonnet")], claudeDir: dir)
-            record("apply settings: an empty file is treated as no settings and written",
-                   parsed() == ["model": "sonnet"], "\(parsed() ?? [:])")
-
-            let linkDir = dir.appendingPathComponent("linked", isDirectory: true)
-            try fm.createDirectory(at: linkDir, withIntermediateDirectories: true)
-            try original.write(to: file)
-            let link = linkDir.appendingPathComponent("settings.json")
-            try fm.createSymbolicLink(atPath: link.path, withDestinationPath: file.path)
-            ShimProcess.applyClaudeSettings([("model", "haiku")], claudeDir: linkDir)
-            record("apply settings: a symlinked settings.json stays a link and its target is written",
-                   (try? fm.destinationOfSymbolicLink(atPath: link.path)) == file.path
-                       && (parsed()?["model"] as? String) == "haiku")
-        } catch {
-            record("apply settings: setup failed", false, "\(error)")
+            var local: [String: String] = [:]
+            ShimProcess.applyModelSelection(to: &local, model: "sonnet", effortLevel: "high", remote: false)
+            record("model selection: a local session gets ANTHROPIC_MODEL and CLAUDE_CODE_EFFORT_LEVEL",
+                   local == ["ANTHROPIC_MODEL": "sonnet", "CLAUDE_CODE_EFFORT_LEVEL": "high"], "\(local)")
+            var remote: [String: String] = [:]
+            ShimProcess.applyModelSelection(to: &remote, model: "sonnet", effortLevel: "high", remote: true)
+            record("model selection: a remote session gets the wrapper's CANOPY_REMOTE_* keys",
+                   remote == ["CANOPY_REMOTE_MODEL": "sonnet", "CANOPY_REMOTE_EFFORT": "high"], "\(remote)")
+            var auto = ["ANTHROPIC_MODEL": "inherited"]
+            ShimProcess.applyModelSelection(to: &auto, model: "", effortLevel: nil, remote: false)
+            record("model selection: Auto sets nothing and keeps an inherited ANTHROPIC_MODEL",
+                   auto == ["ANTHROPIC_MODEL": "inherited"], "\(auto)")
         }
 
         JobLogicProbe.run { record($0, $1, $2) }
