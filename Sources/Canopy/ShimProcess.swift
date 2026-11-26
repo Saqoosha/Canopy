@@ -4266,25 +4266,40 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
 
     // MARK: - Claude Settings
 
-    /// Write or remove multiple keys in ~/.claude/settings.json atomically (single read-modify-write).
-    private static func applyClaudeSettings(_ pairs: [(key: String, value: String?)]) {
-        let claudeDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
+    /// Write or remove keys in ~/.claude/settings.json; a no-op change skips the write, since a write reformats the whole file and chezmoi then sees drift.
+    static func applyClaudeSettings(
+        _ pairs: [(key: String, value: String?)],
+        claudeDir: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
+    ) {
         let path = claudeDir.appendingPathComponent("settings.json")
-        try? FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
-        var dict: [String: Any] = (try? Data(contentsOf: path))
-            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        var dict: [String: Any] = [:]
+        if FileManager.default.fileExists(atPath: path.path) {
+            guard let data = try? Data(contentsOf: path),
+                  let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                logger.error("settings.json exists but does not read as a JSON object; not writing \(path.path, privacy: .public)")
+                return
+            }
+            dict = parsed
+        }
+        var changed = false
         for (key, value) in pairs {
             if let value {
-                dict[key] = value
-            } else {
-                dict.removeValue(forKey: key)
+                if dict[key] as? String != value { dict[key] = value; changed = true }
+            } else if dict.removeValue(forKey: key) != nil {
+                changed = true
             }
         }
-        if let data = try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys]) {
-            try? data.write(to: path)
-        }
+        guard changed else { return }
         let desc = pairs.map { "\($0.key)=\($0.value ?? "nil")" }.joined(separator: ", ")
-        logger.info("Applied ~/.claude/settings.json: \(desc, privacy: .public)")
+        do {
+            try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(
+                withJSONObject: dict, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+            try data.write(to: path)
+            logger.notice("Applied ~/.claude/settings.json: \(desc, privacy: .public)")
+        } catch {
+            logger.error("settings.json write failed (\(desc, privacy: .public)): \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     // MARK: - Shim Path Discovery
