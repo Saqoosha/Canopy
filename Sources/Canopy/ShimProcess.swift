@@ -3247,8 +3247,8 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         if remoteHost == nil {
             let cleaned = UserDefaults.standard.bool(forKey: Self.legacyModelCleanedKey)
             let pairs = Self.localSettingsPairs(effortLevel: effortLevel, legacyModelCleaned: cleaned)
-            if !pairs.isEmpty { Self.applyClaudeSettings(pairs) }
-            if !cleaned { UserDefaults.standard.set(true, forKey: Self.legacyModelCleanedKey) }
+            let applied = pairs.isEmpty || Self.applyClaudeSettings(pairs)
+            if !cleaned, applied { UserDefaults.standard.set(true, forKey: Self.legacyModelCleanedKey) }
         }
 
         // Pin the standard 200K context tier when the user picked a non-1M Opus model.
@@ -4292,17 +4292,18 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     nonisolated static let legacyModelCleanedKey = "settings.legacyModelCleaned"
 
     /// Write or remove keys in ~/.claude/settings.json; a no-op change skips the write, since a write reformats the whole file and chezmoi then sees drift.
+    @discardableResult
     static func applyClaudeSettings(
         _ pairs: [(key: String, value: String?)],
         claudeDir: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")
-    ) {
+    ) -> Bool {
         let path = claudeDir.appendingPathComponent("settings.json")
         var dict: [String: Any] = [:]
         if FileManager.default.fileExists(atPath: path.path),
            let data = try? Data(contentsOf: path), !String(decoding: data, as: UTF8.self).allSatisfy(\.isWhitespace) {
             guard let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 logger.error("settings.json exists but does not read as a JSON object; not writing \(path.path, privacy: .public)")
-                return
+                return false
             }
             dict = parsed
         }
@@ -4314,7 +4315,7 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 changed = true
             }
         }
-        guard changed else { return }
+        guard changed else { return true }
         let desc = pairs.map { "\($0.key)=\($0.value ?? "nil")" }.joined(separator: ", ")
         do {
             try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
@@ -4322,8 +4323,10 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
                 withJSONObject: dict, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
             try data.write(to: path)
             logger.notice("Applied ~/.claude/settings.json: \(desc, privacy: .public)")
+            return true
         } catch {
             logger.error("settings.json write failed (\(desc, privacy: .public)): \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 

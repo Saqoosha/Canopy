@@ -16756,9 +16756,9 @@ enum SidebarLogicProbe {
 
             """.utf8)
             try original.write(to: file)
-            ShimProcess.applyClaudeSettings([("model", "opus"), ("effortLevel", "high")], claudeDir: dir)
-            record("apply settings: unchanged values leave the bytes alone",
-                   (try? Data(contentsOf: file)) == original)
+            let noOp = ShimProcess.applyClaudeSettings([("model", "opus"), ("effortLevel", "high")], claudeDir: dir)
+            record("apply settings: unchanged values leave the bytes alone and report success",
+                   (try? Data(contentsOf: file)) == original && noOp)
             ShimProcess.applyClaudeSettings([("model", "opus"), ("missingKey", nil)], claudeDir: dir)
             record("apply settings: removing an absent key leaves the bytes alone",
                    (try? Data(contentsOf: file)) == original)
@@ -16772,9 +16772,9 @@ enum SidebarLogicProbe {
 
             let broken = Data("{ \"model\": \"op".utf8)  // a half-written file
             try broken.write(to: file)
-            ShimProcess.applyClaudeSettings([("model", "sonnet")], claudeDir: dir)
-            record("apply settings: an unparseable file is not overwritten",
-                   (try? Data(contentsOf: file)) == broken)
+            let brokenResult = ShimProcess.applyClaudeSettings([("model", "sonnet")], claudeDir: dir)
+            record("apply settings: an unparseable file is not overwritten and reports failure",
+                   (try? Data(contentsOf: file)) == broken && !brokenResult)
 
             try Data().write(to: file)
             ShimProcess.applyClaudeSettings([("model", "sonnet")], claudeDir: dir)
