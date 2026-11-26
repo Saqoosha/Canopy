@@ -3244,7 +3244,12 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
         }
 
         Self.applyModelSelection(to: &env, model: model, effortLevel: effortLevel, remote: remoteHost != nil)
-        if remoteHost == nil { Self.applyClaudeSettings(Self.localSettingsPairs(model: model, effortLevel: effortLevel)) }
+        if remoteHost == nil {
+            let cleaned = UserDefaults.standard.bool(forKey: Self.legacyModelCleanedKey)
+            let pairs = Self.localSettingsPairs(effortLevel: effortLevel, legacyModelCleaned: cleaned)
+            if !pairs.isEmpty { Self.applyClaudeSettings(pairs) }
+            if !cleaned { UserDefaults.standard.set(true, forKey: Self.legacyModelCleanedKey) }
+        }
 
         // Pin the standard 200K context tier when the user picked a non-1M Opus model.
         // For 1M-eligible accounts the CLI force-appends "[1m]" to ANY opus model at
@@ -4276,13 +4281,15 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     /// Marks an `ANTHROPIC_MODEL` as Canopy's, so a Canopy started inside a session drops it but keeps a user-exported one.
     nonisolated static let assignedModelMarkerKey = "CANOPY_ASSIGNED_MODEL"
 
-    /// What a local launch writes to settings.json: effort as picked, and on Auto the removal of a `model` older Canopy wrote.
-    nonisolated static func localSettingsPairs(model: String?, effortLevel: String?) -> [(key: String, value: String?)] {
+    /// What a local launch writes to settings.json: a picked effort (Auto leaves the user's alone), and once the removal of the `model` older Canopy wrote.
+    nonisolated static func localSettingsPairs(effortLevel: String?, legacyModelCleaned: Bool) -> [(key: String, value: String?)] {
         var pairs: [(key: String, value: String?)] = []
-        if model?.isEmpty ?? true { pairs.append(("model", nil)) }
-        pairs.append(("effortLevel", effortLevel.flatMap { $0.isEmpty ? nil : $0 }))
+        if !legacyModelCleaned { pairs.append(("model", nil)) }
+        if let effortLevel, !effortLevel.isEmpty { pairs.append(("effortLevel", effortLevel)) }
         return pairs
     }
+
+    nonisolated static let legacyModelCleanedKey = "settings.legacyModelCleaned"
 
     /// Write or remove keys in ~/.claude/settings.json; a no-op change skips the write, since a write reformats the whole file and chezmoi then sees drift.
     static func applyClaudeSettings(

@@ -16720,12 +16720,14 @@ enum SidebarLogicProbe {
             record("model selection: Auto sets nothing and keeps an inherited ANTHROPIC_MODEL",
                    auto == ["ANTHROPIC_MODEL": "inherited"], "\(auto)")
 
-            let picked = ShimProcess.localSettingsPairs(model: "sonnet", effortLevel: "high")
-            record("model selection: a picked model leaves settings.json's model alone; effort is written",
+            let picked = ShimProcess.localSettingsPairs(effortLevel: "high", legacyModelCleaned: true)
+            record("model selection: a picked effort is written and the model key is left alone",
                    picked.map(\.key) == ["effortLevel"] && picked.first?.value == "high")
-            let autoPairs = ShimProcess.localSettingsPairs(model: nil, effortLevel: "")
-            record("model selection: Auto removes a model and effort an older Canopy wrote",
-                   autoPairs.map(\.key) == ["model", "effortLevel"] && autoPairs.allSatisfy { $0.value == nil })
+            record("model selection: Auto effort leaves settings.json alone",
+                   ShimProcess.localSettingsPairs(effortLevel: "", legacyModelCleaned: true).isEmpty)
+            let first = ShimProcess.localSettingsPairs(effortLevel: nil, legacyModelCleaned: false)
+            record("model selection: the first launch removes the model an older Canopy wrote",
+                   first.map(\.key) == ["model"] && first.first?.value == nil)
 
             let nested = ShimProcess.scrubbingCanopyAssignedKeys(["ANTHROPIC_MODEL": "sonnet", marker: "sonnet"])
             record("env scrub: a Canopy-assigned ANTHROPIC_MODEL is dropped with its marker", nested.isEmpty, "\(nested)")
@@ -16791,7 +16793,6 @@ enum SidebarLogicProbe {
         } catch {
             record("apply settings: setup failed", false, "\(error)")
         }
-
 
         JobLogicProbe.run { record($0, $1, $2) }
 
