@@ -16744,6 +16744,11 @@ enum SidebarLogicProbe {
             record("apply settings: an unparseable file is not overwritten",
                    (try? Data(contentsOf: file)) == broken)
 
+            try Data().write(to: file)
+            ShimProcess.applyClaudeSettings([("model", "sonnet")], claudeDir: dir)
+            record("apply settings: an empty file is treated as no settings and written",
+                   parsed() == ["model": "sonnet"], "\(parsed() ?? [:])")
+
             let linkDir = dir.appendingPathComponent("linked", isDirectory: true)
             try fm.createDirectory(at: linkDir, withIntermediateDirectories: true)
             try original.write(to: file)

@@ -4273,9 +4273,9 @@ final class ShimProcess: NSObject, WKScriptMessageHandler, @unchecked Sendable {
     ) {
         let path = claudeDir.appendingPathComponent("settings.json")
         var dict: [String: Any] = [:]
-        if FileManager.default.fileExists(atPath: path.path) {
-            guard let data = try? Data(contentsOf: path),
-                  let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        if FileManager.default.fileExists(atPath: path.path),
+           let data = try? Data(contentsOf: path), !String(decoding: data, as: UTF8.self).allSatisfy(\.isWhitespace) {
+            guard let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 logger.error("settings.json exists but does not read as a JSON object; not writing \(path.path, privacy: .public)")
                 return
             }
