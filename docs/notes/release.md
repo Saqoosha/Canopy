@@ -2,7 +2,7 @@
 
 Condensed from CLAUDE.md. Full original text: `git show 3b6a198:CLAUDE.md`.
 
-- **`scripts/release.sh` commits the default workspace's `@` and moves `main` there**, so `@` must be an empty change on the latest `main` (`jj git fetch`, then `jj new main` when `@` is empty and undescribed). Pass the model as `MODEL_NAME="Opus 5.5"` (the script adds "Claude "); its default co-author name is stale.
+- **`scripts/release.sh` commits the `@` of the workspace it runs from and moves `main` there**, so `@` must be an empty change on the latest `main` (`jj git fetch`, then `jj new main` when `@` is empty and undescribed). Pass the model as `MODEL_NAME="Opus 5.5"` (the script adds "Claude "); its default co-author name is stale.
 - **Run `scripts/wait_for_appcast.sh <ver>` to confirm a release reached users**; gh-pages pushes have silently failed to build twice.
 - **Verify a fresh appcast against `origin/gh-pages`, never the Pages URL** (it serves the old release for a while and looks like failure).
 - **The appcast must sign the exact DMG published** (issue #188). A mismatch makes Sparkle silently discard the item. Keep `update_appcast.sh` failing before gh-pages unless the downloaded asset is `cmp`-identical to the signed file AND the appcast `length` equals its size; the xattr strip predicate must stay `com.apple.cs.*`.
