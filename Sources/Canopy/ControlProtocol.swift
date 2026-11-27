@@ -151,6 +151,8 @@ enum ControlProtocol {
         guard let cwd = params["cwd"] as? String, cwd.hasPrefix("/") else {
             return .failure(ControlError("cwd must be absolute"))
         }
+        // No folder may not exist yet; `list_folders` names it, so opening it must work (as MirrorServer does).
+        if NoFolder.isNoFolder(URL(fileURLWithPath: cwd)) { NoFolder.prepare() }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
             return .failure(ControlError("not a folder"))
