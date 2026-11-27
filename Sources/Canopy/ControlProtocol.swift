@@ -72,6 +72,11 @@ enum ControlProtocol {
         var wire: [String: Any] { ["name": name, "isDirectory": isDirectory] }
     }
 
+    /// `list_folders`' result. `noFolder` is never in `folders`; a client starts there by that path.
+    static func foldersResult(_ folders: [String], limit: Int) -> [String: Any] {
+        ["folders": Array(folders.prefix(limit)), "noFolder": NoFolder.directory.path]
+    }
+
     /// Folders first, then files, each case-insensitively by name.
     static func listDirectory(path: String, showHidden: Bool) -> Result<[DirEntry], ControlError> {
         guard path.hasPrefix("/") else { return .failure(ControlError("path must be absolute")) }
@@ -146,6 +151,8 @@ enum ControlProtocol {
         guard let cwd = params["cwd"] as? String, cwd.hasPrefix("/") else {
             return .failure(ControlError("cwd must be absolute"))
         }
+        // No folder may not exist yet; `list_folders` names it, so opening it must work (as MirrorServer does).
+        if NoFolder.isNoFolder(URL(fileURLWithPath: cwd)) { NoFolder.prepare() }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue else {
             return .failure(ControlError("not a folder"))
