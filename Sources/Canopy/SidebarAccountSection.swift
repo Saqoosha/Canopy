@@ -7,6 +7,18 @@ import SwiftUI
 struct SidebarAccountSection: View {
     @Environment(\.displayScale) private var displayScale
     private var data: SharedRateLimitData { SharedRateLimitData.shared }
+    /// True while the manual refresh button's fetch is in flight. A 429 makes
+    /// `ClaudeUsageDirect` wait 30 s before retrying, so this can stay on for
+    /// up to a minute per login; the button is disabled meanwhile.
+    @State private var isRefreshing = false
+    /// Why the last manual refresh failed, per login; empty when it worked.
+    @State private var refreshFailures: [String] = []
+    @State private var refreshFailedAt: Date = .distantPast
+
+    /// The warning stays only until this Mac's numbers arrive again, from any writer.
+    private var showsRefreshFailure: Bool {
+        !refreshFailures.isEmpty && !data.local.appliedWithin(Date().timeIntervalSince(refreshFailedAt))
+    }
 
     var body: some View {
         // TimelineView ticks every 60s so reset countdowns stay fresh.
@@ -58,7 +70,16 @@ struct SidebarAccountSection: View {
         if hasData || showHeader {
             VStack(alignment: .leading, spacing: 6) {
                 if let header, showHeader {
-                    accountRow(header)
+                    // The refresh button sits on the first block's header only:
+                    // one press refetches every login this Mac holds a
+                    // credential for, so per-account buttons would all do the
+                    // same thing.
+                    HStack(spacing: 4) {
+                        accountRow(header)
+                        if !separated {
+                            refreshButton
+                        }
+                    }
                 }
                 if hasData {
                     // Render each row only when its own reset date is present.
@@ -134,6 +155,46 @@ struct SidebarAccountSection: View {
         .foregroundStyle(.tertiary)
         .padding(.horizontal, 12)
         .padding(.top, 2)
+    }
+
+    /// Fetches usage now instead of waiting for the next shim poll. Covers this
+    /// Mac's default login and every other login in `ClaudeAccountStore`; an
+    /// account seen only through a remote session has no credential here, so
+    /// it still updates on its own session's schedule.
+    private var refreshButton: some View {
+        Button {
+            guard !isRefreshing else { return }
+            isRefreshing = true
+            Task { @MainActor in
+                let window = ClaudeUsageDirect.manualSkipWindow
+                var failures: [String] = []
+                if let failure = await ClaudeUsageDirect.refreshLocalAccount(skipIfAppliedWithin: window) {
+                    failures.append(failure)
+                }
+                failures += await ClaudeUsageDirect.refreshOtherAccounts(skipIfAppliedWithin: window)
+                refreshFailures = failures
+                refreshFailedAt = Date()
+                isRefreshing = false
+            }
+        } label: {
+            Group {
+                if isRefreshing {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: showsRefreshFailure ? "exclamationmark.triangle" : "arrow.clockwise")
+                        .font(.caption2)
+                }
+            }
+            .frame(width: 14, height: 14)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.tertiary)
+        .disabled(isRefreshing)
+        .help(!showsRefreshFailure
+            ? "Refresh usage"
+            : "Refresh failed — \(refreshFailures.joined(separator: "; ")). Click to retry.")
+        .padding(.trailing, 12)
     }
 
     /// Heads an account's block. This Mac's shows the email `ClaudeAccountInfo`

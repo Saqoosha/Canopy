@@ -257,7 +257,7 @@ struct MirrorPaneView: NSViewRepresentable {
                 SharedRateLimitData.shared.account(for: key).updateFromRawUsage(rateLimits)
             } else if ownAccountFromThisMac, MirrorUsageFrame.isUsageFrame(frame) {
                 // This Mac's own account, from this Mac's daemon only (another Mac's cache can be older).
-                // The GUI fetches it just once at launch; the shims and the 10-minute refresh live in canopyd.
+                // Applying it also tells the GUI's idle refresh timer the numbers are current.
                 SharedRateLimitData.shared.local.updateFromRawUsage(rateLimits)
             }
         }

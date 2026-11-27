@@ -46,18 +46,37 @@ enum ClaudeUsageDirect {
     /// they skipped. The CLI never retries a 429 (its wrapper retries a 401
     /// once, after a token refresh) because its poller comes back next
     /// minute; this call has no next minute.
-    @MainActor
-    static func refreshLocalAccount() async {
-        await refresh(SharedRateLimitData.shared.local, keychainService: KeychainAuth.defaultService, label: "usage")
+    /// Returns a one-line failure reason, or nil when it applied or skipped.
+    @MainActor @discardableResult
+    static func refreshLocalAccount(skipIfAppliedWithin: TimeInterval? = nil) async -> String? {
+        await refresh(SharedRateLimitData.shared.local, keychainService: KeychainAuth.defaultService, label: "usage",
+                      skipIfAppliedWithin: skipIfAppliedWithin)
+            .map { "default login: \($0)" }
     }
+
+    /// How often the GUI refetches while no session is asking. Five minutes,
+    /// not one: the endpoint allows about one request a minute per account,
+    /// and the CLI's own pollers spend that same budget, so a one-minute timer
+    /// would collide with them and mostly collect 429s.
+    static let idleRefreshInterval: TimeInterval = 5 * 60
+    /// The timer skips an account whose numbers arrived within this window. Shorter
+    /// than the period, because the timer's own fetch stamps the time only when it
+    /// finishes: with equal values every other tick was skipped (10 min cadence).
+    static let idleSkipWindow: TimeInterval = idleRefreshInterval / 2
+    /// The manual button skips an account updated within the endpoint's ~1/min
+    /// budget: those numbers are current, and a fetch would 429.
+    static let manualSkipWindow: TimeInterval = 60
+    static let requestTimeout: TimeInterval = 10
 
     /// Fetch every other login's usage too, so a new session can be started
     /// on one with quota left before any session has run on it
     /// (`ClaudeAccountPicker`). One at a time: each has its own budget, but
     /// there is no hurry. A login whose `.claude.json` names the same account
     /// as the default login is already covered by `refreshLocalAccount`.
-    @MainActor
-    static func refreshOtherAccounts() async {
+    /// Returns one failure reason per login that failed.
+    @MainActor @discardableResult
+    static func refreshOtherAccounts(skipIfAppliedWithin: TimeInterval? = nil) async -> [String] {
+        var failures: [String] = []
         let registry = SharedRateLimitData.shared
         let localEmail = ClaudeAccountInfo.current()?.email
         let accounts = ClaudeAccountStore.load()
@@ -71,28 +90,58 @@ enum ClaudeUsageDirect {
                 continue
             }
             registry.noteResolved(host: dir.path, key: key)
-            await refresh(registry.account(for: key), keychainService: account.keychainService,
-                          label: "usage[\(account.name)]")
+            if let failure = await refresh(registry.account(for: key), keychainService: account.keychainService,
+                                           label: "usage[\(account.name)]", skipIfAppliedWithin: skipIfAppliedWithin) {
+                failures.append("\(account.name): \(failure)")
+            }
         }
+        return failures
     }
 
     @MainActor
-    private static func refresh(_ account: RateLimitAccount, keychainService: String, label: String) async {
+    private static func refresh(_ account: RateLimitAccount, keychainService: String, label: String,
+                                skipIfAppliedWithin: TimeInterval? = nil) async -> String? {
+        // A shim or an earlier fetch already has fresh numbers on screen.
+        if shouldSkip(account, window: skipIfAppliedWithin) { return nil }
+        // Another caller (launch, timer, button) is already fetching this account; a second request would 429.
+        let id = ObjectIdentifier(account)
+        guard inFlight.insert(id).inserted else { return nil }
+        defer { inFlight.remove(id) }
         for attempt in 1 ... maxAttempts {
             do {
                 let rateLimits = try await fetchRateLimits(keychainService: keychainService)
                 account.updateFromRawUsage(rateLimits)
                 account.noteUsageRequested()
                 logger.notice("[direct] \(label, privacy: .public): applied (attempt \(attempt, privacy: .public))")
-                return
+                return nil
             } catch {
                 guard shouldRetry(after: error, attempt: attempt) else {
                     AnthropicDirect.log(error, label: label)
-                    return
+                    return failureSummary(error)
                 }
                 logger.notice("[direct] \(label, privacy: .public): HTTP 429, retrying in \(retryDelay.components.seconds, privacy: .public) s")
                 try? await Task.sleep(for: retryDelay)
             }
+        }
+        return "HTTP 429"  // unreachable: the last attempt's 429 returns above
+    }
+
+    @MainActor private static var inFlight: Set<ObjectIdentifier> = []
+
+    /// The skip decision `refresh` makes: numbers that arrived within the window, not a request sent.
+    @MainActor
+    static func shouldSkip(_ account: RateLimitAccount, window: TimeInterval?) -> Bool {
+        guard let window else { return false }
+        return account.appliedWithin(window)
+    }
+
+    /// Short reason for the refresh button's tooltip; no response body.
+    static func failureSummary(_ error: Error) -> String {
+        switch error {
+        case AnthropicDirect.Failure.noCredential: return "no credential"
+        case let AnthropicDirect.Failure.http(status, _): return "HTTP \(status)"
+        case AnthropicDirect.Failure.malformedResponse: return "malformed response"
+        default: return error.localizedDescription
         }
     }
 
@@ -107,7 +156,7 @@ enum ClaudeUsageDirect {
     /// consumes — the shape the CLI hands back as
     /// `get_usage_response.usage.rate_limits`.
     static func fetchRateLimits(keychainService: String = KeychainAuth.defaultService,
-                                timeout: TimeInterval = 10) async throws -> [String: Any] {
+                                timeout: TimeInterval = requestTimeout) async throws -> [String: Any] {
         guard let token = KeychainAuth.readAccessToken(service: keychainService) else {
             throw AnthropicDirect.Failure.noCredential
         }
