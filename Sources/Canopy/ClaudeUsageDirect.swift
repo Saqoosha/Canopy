@@ -47,9 +47,16 @@ enum ClaudeUsageDirect {
     /// once, after a token refresh) because its poller comes back next
     /// minute; this call has no next minute.
     @MainActor
-    static func refreshLocalAccount() async {
-        await refresh(SharedRateLimitData.shared.local, keychainService: KeychainAuth.defaultService, label: "usage")
+    static func refreshLocalAccount(skipIfRequestedWithin: TimeInterval? = nil) async {
+        await refresh(SharedRateLimitData.shared.local, keychainService: KeychainAuth.defaultService, label: "usage",
+                      skipIfRequestedWithin: skipIfRequestedWithin)
     }
+
+    /// How often the GUI refetches while no session is asking. Five minutes,
+    /// not one: the endpoint allows about one request a minute per account,
+    /// and the CLI's own pollers spend that same budget, so a one-minute timer
+    /// would collide with them and mostly collect 429s.
+    static let idleRefreshInterval: TimeInterval = 5 * 60
 
     /// Fetch every other login's usage too, so a new session can be started
     /// on one with quota left before any session has run on it
@@ -57,7 +64,7 @@ enum ClaudeUsageDirect {
     /// there is no hurry. A login whose `.claude.json` names the same account
     /// as the default login is already covered by `refreshLocalAccount`.
     @MainActor
-    static func refreshOtherAccounts() async {
+    static func refreshOtherAccounts(skipIfRequestedWithin: TimeInterval? = nil) async {
         let registry = SharedRateLimitData.shared
         let localEmail = ClaudeAccountInfo.current()?.email
         let accounts = ClaudeAccountStore.load()
@@ -72,12 +79,15 @@ enum ClaudeUsageDirect {
             }
             registry.noteResolved(host: dir.path, key: key)
             await refresh(registry.account(for: key), keychainService: account.keychainService,
-                          label: "usage[\(account.name)]")
+                          label: "usage[\(account.name)]", skipIfRequestedWithin: skipIfRequestedWithin)
         }
     }
 
     @MainActor
-    private static func refresh(_ account: RateLimitAccount, keychainService: String, label: String) async {
+    private static func refresh(_ account: RateLimitAccount, keychainService: String, label: String,
+                                skipIfRequestedWithin: TimeInterval? = nil) async {
+        // A shim or an earlier fetch already has fresh numbers on screen.
+        if let interval = skipIfRequestedWithin, account.requestedWithin(interval) { return }
         for attempt in 1 ... maxAttempts {
             do {
                 let rateLimits = try await fetchRateLimits(keychainService: keychainService)

@@ -694,6 +694,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             await ClaudeUsageDirect.refreshLocalAccount()
             await ClaudeUsageDirect.refreshOtherAccounts()
         }
+        // Shims fetch only on turn activity, so with every session idle the
+        // bars froze while another Mac or the web app spent the same quota.
+        // Skips any account fetched within the interval, so an active session
+        // costs no extra request. The run loop keeps the timer alive.
+        let interval = ClaudeUsageDirect.idleRefreshInterval
+        Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in
+            Task { @MainActor in
+                await ClaudeUsageDirect.refreshLocalAccount(skipIfRequestedWithin: interval)
+                await ClaudeUsageDirect.refreshOtherAccounts(skipIfRequestedWithin: interval)
+            }
+        }
 
         // SwiftUI may make the first window main before our observer is
         // registered, in which case `didBecomeMainNotification` fires

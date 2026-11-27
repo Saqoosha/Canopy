@@ -7,6 +7,10 @@ import SwiftUI
 struct SidebarAccountSection: View {
     @Environment(\.displayScale) private var displayScale
     private var data: SharedRateLimitData { SharedRateLimitData.shared }
+    /// True while the manual refresh button's fetch is in flight. A 429 makes
+    /// `ClaudeUsageDirect` wait 30 s before retrying, so this can stay on for
+    /// up to a minute; the button is disabled meanwhile so presses don't stack.
+    @State private var isRefreshing = false
 
     var body: some View {
         // TimelineView ticks every 60s so reset countdowns stay fresh.
@@ -58,7 +62,16 @@ struct SidebarAccountSection: View {
         if hasData || showHeader {
             VStack(alignment: .leading, spacing: 6) {
                 if let header, showHeader {
-                    accountRow(header)
+                    // The refresh button sits on the first block's header only:
+                    // one press refetches every login this Mac holds a
+                    // credential for, so per-account buttons would all do the
+                    // same thing.
+                    HStack(spacing: 4) {
+                        accountRow(header)
+                        if !separated {
+                            refreshButton
+                        }
+                    }
                 }
                 if hasData {
                     // Render each row only when its own reset date is present.
@@ -134,6 +147,38 @@ struct SidebarAccountSection: View {
         .foregroundStyle(.tertiary)
         .padding(.horizontal, 12)
         .padding(.top, 2)
+    }
+
+    /// Fetches usage now instead of waiting for the next shim poll. Covers this
+    /// Mac's default login and every other login in `ClaudeAccountStore`; an
+    /// account seen only through a remote session has no credential here, so
+    /// it still updates on its own session's schedule.
+    private var refreshButton: some View {
+        Button {
+            guard !isRefreshing else { return }
+            isRefreshing = true
+            Task { @MainActor in
+                await ClaudeUsageDirect.refreshLocalAccount()
+                await ClaudeUsageDirect.refreshOtherAccounts()
+                isRefreshing = false
+            }
+        } label: {
+            Group {
+                if isRefreshing {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption2)
+                }
+            }
+            .frame(width: 14, height: 14)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.tertiary)
+        .disabled(isRefreshing)
+        .help("Refresh usage")
+        .padding(.trailing, 12)
     }
 
     /// Heads an account's block. This Mac's shows the email `ClaudeAccountInfo`
