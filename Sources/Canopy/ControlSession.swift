@@ -541,7 +541,7 @@ final class ControlSession {
     private func listFolders(_ request: ControlProtocol.Request) {
         let limit = ControlProtocol.limit(request.params, default: 20)
         let folders = RecentDirectories.load().filter { FileManager.default.fileExists(atPath: $0.path) }
-        reply(request, ["folders": folders.prefix(limit).map(\.path)])
+        reply(request, ControlProtocol.foldersResult(folders.map(\.path), limit: limit))
     }
 
     private func browse(_ request: ControlProtocol.Request) {

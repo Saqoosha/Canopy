@@ -2176,6 +2176,11 @@ enum SidebarLogicProbe {
                    controlReq?.id == "r1" && controlReq?.verb == "list_folders" && controlReq?.params["limit"] as? Int == 5)
             record("control request: a request without an id is rejected",
                    ControlProtocol.parseRequest(["type": "request", "verb": "list_folders"]) == nil)
+            let foldersResult = ControlProtocol.foldersResult(["/a", "/b", "/c"], limit: 2)
+            record("control list_folders: folders are capped at the limit",
+                   foldersResult["folders"] as? [String] == ["/a", "/b"])
+            record("control list_folders: names this Mac's No folder",
+                   foldersResult["noFolder"] as? String == NoFolder.directory.path)
             record("control request: absent params become empty",
                    ControlProtocol.parseRequest(["type": "request", "id": "r2", "verb": "subscribe"])?.params.isEmpty == true)
             record("control response: error carries id and message",
