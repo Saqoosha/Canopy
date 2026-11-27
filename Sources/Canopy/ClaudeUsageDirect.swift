@@ -48,9 +48,9 @@ enum ClaudeUsageDirect {
     /// minute; this call has no next minute.
     /// Returns a one-line failure reason, or nil when it applied or skipped.
     @MainActor @discardableResult
-    static func refreshLocalAccount(skipIfRequestedWithin: TimeInterval? = nil) async -> String? {
+    static func refreshLocalAccount(skipIfAppliedWithin: TimeInterval? = nil) async -> String? {
         await refresh(SharedRateLimitData.shared.local, keychainService: KeychainAuth.defaultService, label: "usage",
-                      skipIfRequestedWithin: skipIfRequestedWithin)
+                      skipIfAppliedWithin: skipIfAppliedWithin)
             .map { "default login: \($0)" }
     }
 
@@ -75,7 +75,7 @@ enum ClaudeUsageDirect {
     /// as the default login is already covered by `refreshLocalAccount`.
     /// Returns one failure reason per login that failed.
     @MainActor @discardableResult
-    static func refreshOtherAccounts(skipIfRequestedWithin: TimeInterval? = nil) async -> [String] {
+    static func refreshOtherAccounts(skipIfAppliedWithin: TimeInterval? = nil) async -> [String] {
         var failures: [String] = []
         let registry = SharedRateLimitData.shared
         let localEmail = ClaudeAccountInfo.current()?.email
@@ -91,7 +91,7 @@ enum ClaudeUsageDirect {
             }
             registry.noteResolved(host: dir.path, key: key)
             if let failure = await refresh(registry.account(for: key), keychainService: account.keychainService,
-                                           label: "usage[\(account.name)]", skipIfRequestedWithin: skipIfRequestedWithin) {
+                                           label: "usage[\(account.name)]", skipIfAppliedWithin: skipIfAppliedWithin) {
                 failures.append("\(account.name): \(failure)")
             }
         }
@@ -100,9 +100,13 @@ enum ClaudeUsageDirect {
 
     @MainActor
     private static func refresh(_ account: RateLimitAccount, keychainService: String, label: String,
-                                skipIfRequestedWithin: TimeInterval? = nil) async -> String? {
+                                skipIfAppliedWithin: TimeInterval? = nil) async -> String? {
         // A shim or an earlier fetch already has fresh numbers on screen.
-        if let interval = skipIfRequestedWithin, account.appliedWithin(interval) { return nil }
+        if shouldSkip(account, window: skipIfAppliedWithin) { return nil }
+        // Another caller (launch, timer, button) is already fetching this account; a second request would 429.
+        let id = ObjectIdentifier(account)
+        guard inFlight.insert(id).inserted else { return nil }
+        defer { inFlight.remove(id) }
         for attempt in 1 ... maxAttempts {
             do {
                 let rateLimits = try await fetchRateLimits(keychainService: keychainService)
@@ -122,11 +126,21 @@ enum ClaudeUsageDirect {
         return "HTTP 429"  // unreachable: the last attempt's 429 returns above
     }
 
+    @MainActor private static var inFlight: Set<ObjectIdentifier> = []
+
+    /// The skip decision `refresh` makes: numbers that arrived within the window, not a request sent.
+    @MainActor
+    static func shouldSkip(_ account: RateLimitAccount, window: TimeInterval?) -> Bool {
+        guard let window else { return false }
+        return account.appliedWithin(window)
+    }
+
     /// Short reason for the refresh button's tooltip; no response body.
     static func failureSummary(_ error: Error) -> String {
         switch error {
         case AnthropicDirect.Failure.noCredential: return "no credential"
         case let AnthropicDirect.Failure.http(status, _): return "HTTP \(status)"
+        case AnthropicDirect.Failure.malformedResponse: return "malformed response"
         default: return error.localizedDescription
         }
     }

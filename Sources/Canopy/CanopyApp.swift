@@ -701,8 +701,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Timer.scheduledTimer(withTimeInterval: ClaudeUsageDirect.idleRefreshInterval, repeats: true) { _ in
             Task { @MainActor in
                 let window = ClaudeUsageDirect.idleSkipWindow
-                await ClaudeUsageDirect.refreshLocalAccount(skipIfRequestedWithin: window)
-                await ClaudeUsageDirect.refreshOtherAccounts(skipIfRequestedWithin: window)
+                await ClaudeUsageDirect.refreshLocalAccount(skipIfAppliedWithin: window)
+                await ClaudeUsageDirect.refreshOtherAccounts(skipIfAppliedWithin: window)
             }
         }
 

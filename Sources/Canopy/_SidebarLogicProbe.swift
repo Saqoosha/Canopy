@@ -15724,9 +15724,9 @@ enum SidebarLogicProbe {
                        && !ClaudeUsageDirect.shouldRetry(after: AnthropicDirect.Failure.http(status: 503, body: ""), attempt: 1)
                        && !ClaudeUsageDirect.shouldRetry(after: AnthropicDirect.Failure.noCredential, attempt: 1)
                        && !ClaudeUsageDirect.shouldRetry(after: URLError(.notConnectedToInternet), attempt: 1))
-            // The idle timer's own fetch stamps the time when it finishes, up
-            // to every attempt's timeout plus the retry gaps after the tick;
-            // that stamp must not make the next tick skip.
+            // The idle timer's own fetch stamps the time when it finishes, after
+            // the tick; that stamp must not make the next tick skip. Rough bound
+            // for one login: the timeout is per idle gap, not a total deadline.
             let worstFetch = Double(ClaudeUsageDirect.maxAttempts) * ClaudeUsageDirect.requestTimeout
                 + Double(ClaudeUsageDirect.maxAttempts - 1) * Double(ClaudeUsageDirect.retryDelay.components.seconds)
             record("usage idle refresh: the timer's own fetch does not skip its next tick",
@@ -15745,9 +15745,11 @@ enum SidebarLogicProbe {
             let requestedOnly = RateLimitAccount(label: "probe-usage-requested")
             requestedOnly.noteUsageRequested()
             record("usage skip: a request alone does not count as fresh numbers",
-                   !requestedOnly.appliedWithin(ClaudeUsageDirect.idleSkipWindow))
+                   !ClaudeUsageDirect.shouldSkip(requestedOnly, window: ClaudeUsageDirect.idleSkipWindow))
             record("usage skip: applied numbers count as fresh",
-                   account.appliedWithin(ClaudeUsageDirect.idleSkipWindow))
+                   ClaudeUsageDirect.shouldSkip(account, window: ClaudeUsageDirect.idleSkipWindow))
+            record("usage skip: no window never skips",
+                   !ClaudeUsageDirect.shouldSkip(account, window: nil))
         }
 
         // Mirror replay images: Read-tool images become canopy-asset URLs and are kept for serving; other images stay inline.
