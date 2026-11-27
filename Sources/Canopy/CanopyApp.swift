@@ -696,13 +696,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // Shims fetch only on turn activity, so with every session idle the
         // bars froze while another Mac or the web app spent the same quota.
-        // Skips any account fetched within the interval, so an active session
+        // Skips any account whose numbers arrived recently, so an active session
         // costs no extra request. The run loop keeps the timer alive.
-        let interval = ClaudeUsageDirect.idleRefreshInterval
-        Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in
+        Timer.scheduledTimer(withTimeInterval: ClaudeUsageDirect.idleRefreshInterval, repeats: true) { _ in
             Task { @MainActor in
-                await ClaudeUsageDirect.refreshLocalAccount(skipIfRequestedWithin: interval)
-                await ClaudeUsageDirect.refreshOtherAccounts(skipIfRequestedWithin: interval)
+                let window = ClaudeUsageDirect.idleSkipWindow
+                await ClaudeUsageDirect.refreshLocalAccount(skipIfRequestedWithin: window)
+                await ClaudeUsageDirect.refreshOtherAccounts(skipIfRequestedWithin: window)
             }
         }
 

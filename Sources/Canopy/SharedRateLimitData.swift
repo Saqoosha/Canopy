@@ -237,6 +237,14 @@ final class RateLimitAccount {
     private var lastUsageUpdateTime: Date = .distantPast
     private static let updateInterval: TimeInterval = 60
 
+    /// When usage numbers last reached this account from any writer (shim, mirror frame, direct fetch).
+    private var lastAppliedTime: Date = .distantPast
+
+    /// Whether numbers arrived within `interval`. Unlike `requestedWithin`, a request that failed does not count.
+    func appliedWithin(_ interval: TimeInterval) -> Bool {
+        Date().timeIntervalSince(lastAppliedTime) < interval
+    }
+
     /// Whether a request went out within `interval`, without starting the throttle.
     func requestedWithin(_ interval: TimeInterval) -> Bool {
         Date().timeIntervalSince(lastUsageUpdateTime) < interval
@@ -258,6 +266,7 @@ final class RateLimitAccount {
     }
 
     func update(from utilization: [String: Any]) {
+        lastAppliedTime = Date()
         if let entry = utilization["fiveHour"] as? [String: Any] {
             hasNoSessionWindow = false
             sessionPct = entry["utilization"].map { Self.parseUtilization($0) } ?? 0
@@ -289,6 +298,7 @@ final class RateLimitAccount {
     /// malformed raw payload must not zero a bar or blank the whole
     /// sidebar Usage section (whose visibility keys off the reset dates).
     func updateFromRawUsage(_ rateLimits: [String: Any]) {
+        lastAppliedTime = Date()
         // A wrong-type window keeps its last value and warns, so schema drift
         // is findable via the RateLimit log category. `five_hour: null`
         // beside a `seven_day` window is not drift: the account has no

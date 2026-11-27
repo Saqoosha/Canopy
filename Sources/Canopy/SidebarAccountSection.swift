@@ -9,8 +9,10 @@ struct SidebarAccountSection: View {
     private var data: SharedRateLimitData { SharedRateLimitData.shared }
     /// True while the manual refresh button's fetch is in flight. A 429 makes
     /// `ClaudeUsageDirect` wait 30 s before retrying, so this can stay on for
-    /// up to a minute; the button is disabled meanwhile so presses don't stack.
+    /// up to a minute per login; the button is disabled meanwhile.
     @State private var isRefreshing = false
+    /// Why the last manual refresh failed, per login; empty when it worked.
+    @State private var refreshFailures: [String] = []
 
     var body: some View {
         // TimelineView ticks every 60s so reset countdowns stay fresh.
@@ -158,8 +160,13 @@ struct SidebarAccountSection: View {
             guard !isRefreshing else { return }
             isRefreshing = true
             Task { @MainActor in
-                await ClaudeUsageDirect.refreshLocalAccount()
-                await ClaudeUsageDirect.refreshOtherAccounts()
+                let window = ClaudeUsageDirect.manualSkipWindow
+                var failures: [String] = []
+                if let failure = await ClaudeUsageDirect.refreshLocalAccount(skipIfRequestedWithin: window) {
+                    failures.append(failure)
+                }
+                failures += await ClaudeUsageDirect.refreshOtherAccounts(skipIfRequestedWithin: window)
+                refreshFailures = failures
                 isRefreshing = false
             }
         } label: {
@@ -167,7 +174,7 @@ struct SidebarAccountSection: View {
                 if isRefreshing {
                     ProgressView().controlSize(.mini)
                 } else {
-                    Image(systemName: "arrow.clockwise")
+                    Image(systemName: refreshFailures.isEmpty ? "arrow.clockwise" : "exclamationmark.triangle")
                         .font(.caption2)
                 }
             }
@@ -177,7 +184,9 @@ struct SidebarAccountSection: View {
         .buttonStyle(.plain)
         .foregroundStyle(.tertiary)
         .disabled(isRefreshing)
-        .help("Refresh usage")
+        .help(refreshFailures.isEmpty
+            ? "Refresh usage"
+            : "Refresh failed — \(refreshFailures.joined(separator: "; ")). Click to retry.")
         .padding(.trailing, 12)
     }
 
